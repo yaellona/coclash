@@ -20,6 +20,8 @@ pub struct MihomoConfig {
     pub log_level: String,
     #[serde(rename = "external-controller")]
     pub external_controller: String,
+    #[serde(rename = "geox-url", default)]
+    pub geox_url: GeoXUrl,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tun: Option<Tun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,6 +38,25 @@ pub struct MihomoConfig {
     #[serde(rename = "proxy-providers")]
     pub proxy_providers: Option<IndexMap<String, ProxyProvider>>,
     pub rules: Vec<String>,
+}
+
+const GEO_MIRROR: &str = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release";
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GeoXUrl {
+    pub geoip: String,
+    pub geosite: String,
+    pub mmdb: String,
+}
+
+impl Default for GeoXUrl {
+    fn default() -> Self {
+        Self {
+            geoip: format!("{GEO_MIRROR}/geoip.dat"),
+            geosite: format!("{GEO_MIRROR}/geosite.dat"),
+            mmdb: format!("{GEO_MIRROR}/geoip.metadb"),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -192,6 +213,7 @@ impl MihomoConfig {
             mode: "Rule".to_string(),
             log_level: "info".to_string(),
             external_controller: settings.external_controller.clone(),
+            geox_url: GeoXUrl::default(),
             tun: None,
             dns: None,
             unified_delay: true,

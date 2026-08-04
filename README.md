@@ -23,6 +23,10 @@
 - 启动失败但进程残留时（端口未就绪），仍可按 `s` 停止。
 - mihomo 进程的 stdout/stderr 会写入 `{config_dir}/mihomors/mihomo.log`，按 `l` 可在 TUI 内查看。
 
+## Geo 数据源
+
+GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net`）下载，可在 `config.yaml` 的 `geodata-url` / `geosite-url` 字段自行更换。
+
 ## 界面展示
 
 1. windows中
