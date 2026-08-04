@@ -23,6 +23,12 @@ fn test_pidfile_invalid_content() {
 fn test_is_pid_alive() {
     assert!(mihomo::is_pid_alive(std::process::id()));
     assert!(!mihomo::is_pid_alive(u32::MAX));
+
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    assert!(mihomo::is_pid_alive(pid));
+    child.wait().unwrap();
+    assert!(!mihomo::is_pid_alive(pid));
 }
 
 #[test]

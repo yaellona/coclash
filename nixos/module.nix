@@ -6,6 +6,9 @@
 #   # 可选：自定义 mihomo 路径（默认指向带权限的 wrapper）
 #   # programs.teclash.mihomo_exe = lib.getExe pkgs.mihomo;
 {
+  self,
+}:
+{
   config,
   lib,
   pkgs,
@@ -30,13 +33,13 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.teclash;
+      default = self.packages.${pkgs.system}.teclash;
       description = "teclash package to install.";
     };
 
     mihomo_exe = lib.mkOption {
       type = lib.types.str;
-      default = "${pkgs.mihomo}/bin/mihomo";
+      default = "/run/wrappers/bin/mihomo";
       description = ''
         mihomo executable injected via the TECLASH_MIHOMO_EXE environment
         variable. Defaults to the security.wrappers wrapper which grants

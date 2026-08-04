@@ -198,6 +198,11 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
+        // pid 0 和超出 pid_t(i32) 范围的 pid 是非法 pid；u32::MAX 会溢出成 -1，
+        // 使 kill(-1, 0) 探测"全部进程"而非单个进程，导致误判存活。
+        if pid == 0 || pid > i32::MAX as u32 {
+            return false;
+        }
         unsafe { libc::kill(pid as i32, 0) == 0 }
     }
 }

@@ -39,7 +39,7 @@
 
           meta = {
             description = "mihomo kernel TUI";
-            homepage = "https://github.com/rimyn/teclash";
+            homepage = "https://github.com/yaellona/teclash";
             license = lib.licenses.mit;
             mainProgram = "teclash";
           };
@@ -53,6 +53,6 @@
       }
     )
     // {
-      nixosModules.default = import ./nixos/module.nix;
+      nixosModules.default = import ./nixos/module.nix { inherit self; };
     };
 }
