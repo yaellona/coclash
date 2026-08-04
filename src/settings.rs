@@ -35,7 +35,7 @@ impl Default for Settings {
             provider_retry: 6,
             provider_retry_interval_ms: 500,
             poll_interval_ms: 100,
-            mihomo_exe: "mihomo-windows-amd64.exe".to_string(),
+            mihomo_exe: String::new(),
             channel_capacity: 16,
         }
     }

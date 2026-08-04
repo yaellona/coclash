@@ -20,6 +20,145 @@ pub enum MihomoStatus {
     External,
 }
 
+// ===== mihomo 二进制解析 =====
+
+pub const ENV_VAR_NAME: &str = "TECLASH_MIHOMO_EXE";
+pub const ENV_FILE_KEY: &str = "MIHOMO_EXE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinarySource {
+    EnvVar,
+    EnvFile,
+    Settings,
+    #[cfg_attr(windows, allow(dead_code))]
+    NixWrapper,
+    Path,
+}
+
+impl BinarySource {
+    pub fn label(self) -> &'static str {
+        match self {
+            BinarySource::EnvVar => "环境变量",
+            BinarySource::EnvFile => "同目录 .env",
+            BinarySource::Settings => "settings.json",
+            BinarySource::NixWrapper => "NixOS wrapper",
+            BinarySource::Path => "PATH",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBinary {
+    pub cmd: String,
+    pub source: BinarySource,
+}
+
+/// 解析 .env 内容（支持 # 注释、空行、可选的引号包裹）
+pub(crate) fn parse_env_file(content: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        map.insert(k.trim().to_string(), v.to_string());
+    }
+    map
+}
+
+/// 解析链：环境变量 > 同目录 .env > settings 显式路径 > NixOS wrapper > PATH
+pub fn resolve_mihomo_exe(settings: &Settings) -> ResolvedBinary {
+    let env_val = std::env::var(ENV_VAR_NAME).ok();
+    let env_file = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join(".env")));
+    resolve_mihomo_exe_with(settings, env_val, env_file.as_deref())
+}
+
+pub(crate) fn resolve_mihomo_exe_with(
+    settings: &Settings,
+    env_val: Option<String>,
+    env_file: Option<&Path>,
+) -> ResolvedBinary {
+    // 1. 环境变量（nix 模块 makeWrapper 注入）
+    if let Some(v) = env_val {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return ResolvedBinary {
+                cmd: v,
+                source: BinarySource::EnvVar,
+            };
+        }
+    }
+
+    // 2. 二进制同目录 .env 的 MIHOMO_EXE；相对值以 .env 所在目录为基准
+    if let Some(path) = env_file {
+        if let Ok(content) = fs::read_to_string(path) {
+            if let Some(v) = parse_env_file(&content).get(ENV_FILE_KEY) {
+                let v = v.trim().to_string();
+                if !v.is_empty() {
+                    let cmd = if Path::new(&v).is_absolute() {
+                        v
+                    } else {
+                        path.parent().unwrap_or(Path::new(".")).join(&v).to_string_lossy().into_owned()
+                    };
+                    return ResolvedBinary {
+                        cmd,
+                        source: BinarySource::EnvFile,
+                    };
+                }
+            }
+        }
+    }
+
+    // 3. settings.json 显式路径（含分隔符，避免旧默认文件名遮蔽其他来源）
+    let settings_val = settings.mihomo_exe.trim().to_string();
+    if !settings_val.is_empty()
+        && (settings_val.contains('/')
+            || settings_val.contains('\\')
+            || Path::new(&settings_val).is_absolute())
+    {
+        return ResolvedBinary {
+            cmd: settings_val,
+            source: BinarySource::Settings,
+        };
+    }
+
+    // 4. NixOS setcap wrapper（独立于 shell PATH，任何启动方式都能命中）
+    #[cfg(unix)]
+    if Path::new("/run/wrappers/bin/mihomo").exists() {
+        return ResolvedBinary {
+            cmd: "/run/wrappers/bin/mihomo".to_string(),
+            source: BinarySource::NixWrapper,
+        };
+    }
+
+    // 5. PATH 兜底
+    let name = if settings_val.is_empty() {
+        default_mihomo_name().to_string()
+    } else {
+        settings_val
+    };
+    ResolvedBinary {
+        cmd: name,
+        source: BinarySource::Path,
+    }
+}
+
+#[cfg(windows)]
+fn default_mihomo_name() -> &'static str {
+    "mihomo.exe"
+}
+
+#[cfg(not(windows))]
+fn default_mihomo_name() -> &'static str {
+    "mihomo"
+}
+
 // ===== pidfile =====
 
 fn pidfile_path(config_dir: &Path) -> PathBuf {
@@ -65,14 +204,14 @@ pub fn is_pid_alive(pid: u32) -> bool {
 
 /// PID 存活且确实是本程序启动的那个 mihomo（防止 pidfile 过期后 PID 被复用误杀）
 #[cfg_attr(target_os = "windows", allow(unused_variables))]
-fn is_mihomo_pid(settings: &Settings, config_dir: &Path, pid: u32) -> bool {
+fn is_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path, pid: u32) -> bool {
     if !is_pid_alive(pid) {
         return false;
     }
     #[cfg(windows)]
     {
         windows_image_name(pid)
-            .map(|img| img.eq_ignore_ascii_case(&mihomo_image_name(&settings.mihomo_exe)))
+            .map(|img| img.eq_ignore_ascii_case(&mihomo_image_name(&binary.cmd)))
             .unwrap_or(false)
     }
     #[cfg(unix)]
@@ -104,8 +243,9 @@ fn windows_image_name(pid: u32) -> Option<String> {
 
 /// 综合端口与 PID 记录判断当前状态，同时清理过期的 pidfile
 pub fn detect_status(settings: &Settings, config_dir: &Path) -> MihomoStatus {
+    let binary = resolve_mihomo_exe(settings);
     if let Some(pid) = load_pidfile(config_dir) {
-        if is_mihomo_pid(settings, config_dir, pid) {
+        if is_mihomo_pid(&binary, config_dir, pid) {
             return MihomoStatus::RunningByUs(pid);
         }
         clear_pidfile(config_dir);
@@ -119,13 +259,14 @@ pub fn detect_status(settings: &Settings, config_dir: &Path) -> MihomoStatus {
 
 // ===== mihomo 进程管理 =====
 
-pub fn start_mihomo(settings: &Settings, config_path: &Path) -> Result<u32, String> {
+pub fn start_mihomo(settings: &Settings, config_path: &Path) -> Result<(u32, ResolvedBinary), String> {
     let config_dir = config_path.parent().ok_or("无法获取配置目录")?;
     if is_port_up(settings) {
         return Err("端口已被 mihomo 占用，未启动新进程".to_string());
     }
 
-    let mut cmd = Command::new(&settings.mihomo_exe);
+    let binary = resolve_mihomo_exe(settings);
+    let mut cmd = Command::new(&binary.cmd);
     cmd.args(["-d", config_dir.to_str().ok_or("config路径无效")?])
         .stdin(Stdio::null());
 
@@ -163,7 +304,7 @@ pub fn start_mihomo(settings: &Settings, config_path: &Path) -> Result<u32, Stri
     let child = cmd.spawn().map_err(|e| format!("启动 mihomo 失败: {e}"))?;
     let pid = child.id();
     save_pid(config_dir, pid)?;
-    Ok(pid)
+    Ok((pid, binary))
 }
 
 /// 只停止由本程序启动的 mihomo（依据 pidfile）；外部实例拒绝操作
@@ -177,7 +318,8 @@ pub fn stop_mihomo(settings: &Settings, config_dir: &Path) -> Result<(), String>
             )
         }
     };
-    if !is_mihomo_pid(settings, config_dir, pid) {
+    let binary = resolve_mihomo_exe(settings);
+    if !is_mihomo_pid(&binary, config_dir, pid) {
         clear_pidfile(config_dir);
         return Err(format!("PID 记录 ({pid}) 已失效（进程不存在或不是 mihomo），已清除记录"));
     }

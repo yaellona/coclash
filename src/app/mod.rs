@@ -115,10 +115,16 @@ impl App {
 
     pub fn start_mihomo(&mut self) {
         match mihomo::start_mihomo(&self.settings, &self.config_path) {
-            Ok(pid) => {
+            Ok((pid, binary)) => {
                 self.mihomo_status = MihomoStatus::RunningByUs(pid);
-                self.logs
-                    .add_log(LogType::Info, format!("mihomo 已启动 (PID {pid})"));
+                self.logs.add_log(
+                    LogType::Info,
+                    format!(
+                        "mihomo 已启动 (PID {pid}, {}: {})",
+                        binary.source.label(),
+                        binary.cmd
+                    ),
+                );
                 let tx = self.async_tx.clone();
                 actions::start_and_wait(tx, self.settings.clone());
             }

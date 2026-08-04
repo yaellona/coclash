@@ -95,3 +95,77 @@ fn test_mihomo_log_tail() {
     assert_eq!(lines[0], "line 90");
     assert_eq!(lines[9], "line 99");
 }
+
+#[test]
+fn test_parse_env_file() {
+    let map = mihomo::parse_env_file(
+        "# comment\n\nMIHOMO_EXE=/usr/bin/mihomo\nEMPTY=\nQUOTED=\"a b\"\nBADLINE\n",
+    );
+    assert_eq!(map.get("MIHOMO_EXE").unwrap(), "/usr/bin/mihomo");
+    assert_eq!(map.get("QUOTED").unwrap(), "a b");
+    assert_eq!(map.get("EMPTY").unwrap(), "");
+    assert!(map.get("BADLINE").is_none());
+}
+
+#[test]
+fn test_resolve_env_var_wins() {
+    let settings = Settings::default();
+    let dir = tempfile::TempDir::new().unwrap();
+    let r = mihomo::resolve_mihomo_exe_with(
+        &settings,
+        Some("/from/env/mihomo".to_string()),
+        Some(&dir.path().join(".env")),
+    );
+    assert_eq!(r.cmd, "/from/env/mihomo");
+    assert_eq!(r.source, mihomo::BinarySource::EnvVar);
+}
+
+#[test]
+fn test_resolve_env_file_wins_over_settings() {
+    let mut settings = Settings::default();
+    settings.mihomo_exe = "C:\\explicit\\mihomo.exe".to_string();
+    let dir = tempfile::TempDir::new().unwrap();
+    let env_path = dir.path().join(".env");
+    std::fs::write(&env_path, "MIHOMO_EXE=mihomo.exe\n").unwrap();
+    let r = mihomo::resolve_mihomo_exe_with(&settings, None, Some(&env_path));
+    assert_eq!(r.source, mihomo::BinarySource::EnvFile);
+    assert!(r.cmd.ends_with("mihomo.exe"));
+    assert!(r.cmd.contains("mihomo.exe"));
+}
+
+#[test]
+fn test_resolve_env_file_relative_joins_dir() {
+    let settings = Settings::default();
+    let dir = tempfile::TempDir::new().unwrap();
+    let env_path = dir.path().join(".env");
+    std::fs::write(&env_path, "MIHOMO_EXE=mihomo.exe\n").unwrap();
+    let r = mihomo::resolve_mihomo_exe_with(&settings, None, Some(&env_path));
+    assert_eq!(
+        r.cmd,
+        dir.path().join("mihomo.exe").to_string_lossy().into_owned()
+    );
+    assert_eq!(r.source, mihomo::BinarySource::EnvFile);
+}
+
+#[test]
+fn test_resolve_settings_explicit_path() {
+    let mut settings = Settings::default();
+    settings.mihomo_exe = "/opt/bin/mihomo".to_string();
+    let r = mihomo::resolve_mihomo_exe_with(&settings, None, None);
+    assert_eq!(r.cmd, "/opt/bin/mihomo");
+    assert_eq!(r.source, mihomo::BinarySource::Settings);
+}
+
+#[test]
+fn test_resolve_fallback_to_path() {
+    let settings = Settings::default();
+    let r = mihomo::resolve_mihomo_exe_with(&settings, None, None);
+    assert_eq!(r.source, mihomo::BinarySource::Path);
+    assert!(!r.cmd.is_empty());
+
+    let mut settings2 = Settings::default();
+    settings2.mihomo_exe = "my-mihomo".to_string();
+    let r2 = mihomo::resolve_mihomo_exe_with(&settings2, None, None);
+    assert_eq!(r2.cmd, "my-mihomo");
+    assert_eq!(r2.source, mihomo::BinarySource::Path);
+}
