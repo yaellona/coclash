@@ -20,7 +20,7 @@
 
 ```nix
 # flake 输入
-inputs.teclash.url = "github:rimyn/teclash";
+inputs.teclash.url = "github:yaellona/teclash";
 
 # configuration.nix
 imports = [ inputs.teclash.nixosModules.default ];
