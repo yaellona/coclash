@@ -328,17 +328,6 @@ impl MihomoConfig {
         Ok(())
     }
 
-    pub fn remove_sub(&mut self, sub_name: &str, config_path: &PathBuf) -> Result<(), String> {
-        if let Some(ref mut providers) = self.proxy_providers {
-            providers.shift_remove(sub_name);
-            if providers.is_empty() {
-                self.proxy_providers = None;
-            }
-        }
-        self.write_to_path(config_path)?;
-        Ok(())
-    }
-
     pub fn from_yaml(yaml_str: &str) -> Result<Self, String> {
         serde_yaml::from_str(yaml_str).map_err(|e| format!("解析YAML失败: {}", e))
     }

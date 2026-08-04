@@ -1,4 +1,5 @@
 use crate::app::App;
+use crate::command::mihomo::MihomoStatus;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -71,7 +72,7 @@ pub fn render_provider_select(f: &mut Frame, app: &App) {
 
     let block = Block::default()
         .title("选择代理商")
-        .title_bottom("(Enter 确认, Esc 取消, d 删除代理, r 重命名)")
+        .title_bottom("(Enter 确认, Esc 取消, d 删除代理)")
         .borders(Borders::ALL)
         .style(Style::default().fg(Color::White));
 
@@ -133,6 +134,10 @@ pub fn help_key(f: &mut Frame, app: &App) {
             Cell::from(format!("添加订阅")),
         ]),
         Row::new(vec![
+            Cell::from("l".to_string()),
+            Cell::from(format!("查看mihomo日志")),
+        ]),
+        Row::new(vec![
             Cell::from("c".to_string()),
             Cell::from(format!("切换代理商")),
         ]),
@@ -166,10 +171,10 @@ pub fn help_key(f: &mut Frame, app: &App) {
             Cell::from("s".to_string()),
             Cell::from(format!(
                 "mihomo({})",
-                if app.mihomo_running {
-                    "开启".to_string()
-                } else {
-                    "关闭".to_string()
+                match app.mihomo_status {
+                    MihomoStatus::RunningByUs(_) => "开启".to_string(),
+                    MihomoStatus::External => "外部运行".to_string(),
+                    MihomoStatus::Stopped => "关闭".to_string(),
                 }
             )),
         ]),

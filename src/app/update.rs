@@ -1,6 +1,6 @@
 use crate::app::msg::Msg;
 
-use crate::log::LogType;
+use crate::operation_log::LogType;
 use crossterm::event::KeyCode;
 
 use super::PopupMode;
@@ -66,6 +66,14 @@ impl super::App {
                 KeyCode::Esc => self.popup_mode = PopupMode::None,
                 _ => {}
             },
+            PopupMode::MihomoLog => match key {
+                KeyCode::Esc => self.popup_mode = PopupMode::None,
+                KeyCode::Up => self.mihomo_log.scroll_up(),
+                KeyCode::Down => self.mihomo_log.scroll_down(),
+                KeyCode::PageUp => self.mihomo_log.page_up(),
+                KeyCode::PageDown => self.mihomo_log.page_down(),
+                _ => {}
+            },
             PopupMode::None => match key {
                 KeyCode::Char('q') => {
                     self.should_quit = true;
@@ -89,6 +97,7 @@ impl super::App {
                     actions::reflash_nodes(tx, self.settings.clone());
                 }
                 KeyCode::Char('u') => self.popup_mode = PopupMode::UrlInput,
+                KeyCode::Char('l') => self.popup_mode = PopupMode::MihomoLog,
                 KeyCode::Up => self.navigate_node(-1),
                 KeyCode::Down => self.navigate_node(1),
                 KeyCode::Enter => {

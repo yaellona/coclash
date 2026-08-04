@@ -29,28 +29,3 @@ pub struct ProxyReport {
     #[serde(rename = "type")]
     pub node_type: String,
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProxyItem {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub proxy_type: String,
-    pub server: Option<String>,
-    pub port: Option<u16>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProviderReport {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub provider_type: String,
-    pub proxies: Option<Vec<ProxyItem>>,
-    #[serde(rename = "vehicleType")]
-    pub vehicle_type: Option<String>,
-    #[serde(rename = "subscriptionInfo")]
-    pub subscription_info: Option<serde_json::Value>,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: Option<String>,
-    #[serde(rename = "healthCheck")]
-    pub health_check: Option<serde_json::Value>,
-}

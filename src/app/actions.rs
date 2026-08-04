@@ -2,12 +2,43 @@ use crate::app::App;
 use crate::app::PopupMode;
 use crate::command::mihomo;
 use crate::config::node::Node;
-use crate::log::LogType;
+use crate::operation_log::LogType;
 use crate::settings::Settings;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 pub type AsyncTask = Box<dyn FnOnce(&mut App) + Send>;
+
+/// 启动 mihomo 后轮询端口就绪，就绪后自动刷新节点；
+/// 超时则提示进程可能启动失败（PID 已记录，可按 s 停止）
+pub fn start_and_wait(tx: mpsc::Sender<AsyncTask>, settings: Settings) {
+    tokio::spawn(async move {
+        let attempts = settings.provider_retry.max(1);
+        let interval = settings.provider_retry_interval();
+        for _ in 0..attempts {
+            if mihomo::is_port_up(&settings) {
+                break;
+            }
+            tokio::time::sleep(interval).await;
+        }
+        let ready = mihomo::is_port_up(&settings);
+        let _ = tx
+            .send(Box::new(move |app| {
+                if ready {
+                    app.logs
+                        .add_log(LogType::Info, "mihomo 已就绪，正在拉取节点".to_string());
+                    let tx = app.async_tx.clone();
+                    reflash_nodes(tx, settings);
+                } else {
+                    app.logs.add_log(
+                        LogType::Warn,
+                        "进程已启动但端口未就绪（启动可能较慢或失败），可按 s 停止后重试".to_string(),
+                    );
+                }
+            }))
+            .await;
+    });
+}
 
 pub fn delay(tx: mpsc::Sender<AsyncTask>, settings: Settings) {
     tokio::spawn(async move {
@@ -42,6 +73,7 @@ pub fn reflash_nodes(tx: mpsc::Sender<AsyncTask>, settings: Settings) {
                 Ok(proxy) => {
                     app.current_nodes = vec![];
                     app.select_node = 0;
+                    app.active_node = None;
                     for (index, node) in proxy.all.into_iter().enumerate() {
                         if node == proxy.now {
                             app.active_node = Some(index);

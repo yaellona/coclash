@@ -7,3 +7,5 @@ pub const SUBSCRIPTION_UA: &str =
 pub const CONFIG_DIR_NAME: &str = "mihomors";
 pub const CONFIG_FILE: &str = "config.yaml";
 pub const SETTINGS_FILE: &str = "settings.json";
+pub const PID_FILE: &str = "mihomo.pid";
+pub const MIHOMO_LOG_FILE: &str = "mihomo.log";

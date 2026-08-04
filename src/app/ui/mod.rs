@@ -1,6 +1,7 @@
 pub mod content;
 pub mod footer;
-pub mod log;
+pub mod mihomo_log;
+pub mod operation_log;
 pub mod popup;
 pub mod running_info;
 use crate::app::PopupMode;
@@ -49,7 +50,7 @@ impl App {
                 .split(chunks2[1]);
             let info = running_info::render(&self);
             f.render_widget(info, chunks3[0]);
-            let log = log::render(&self.logs, chunks2[1].width as usize - 10);
+            let log = operation_log::render(&self.logs, chunks2[1].width as usize - 10);
             if !self.logs.is_empty() {
                 self.log_state.select(Some(self.logs.len() - 1));
             }
@@ -72,6 +73,9 @@ impl App {
             }
             PopupMode::HelpKey => {
                 popup::help_key(f, self);
+            }
+            PopupMode::MihomoLog => {
+                mihomo_log::render(f, self);
             }
             _ => {}
         }

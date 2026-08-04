@@ -1,18 +1,20 @@
 pub mod actions;
 pub mod event;
+pub mod mihomo_log;
 pub mod msg;
 pub mod ui;
 pub mod update;
 
-use crate::command::mihomo;
+use crate::command::mihomo::{self, MihomoStatus};
 use crate::command::system_proxy::{disable_proxy, enable_proxy, get_proxy_status};
 use crate::config::mihomo_config::MihomoConfig;
 use crate::config::node::Node;
-use crate::constants::{CONFIG_DIR_NAME, CONFIG_FILE, SETTINGS_FILE};
-use crate::log::{LogType, Logs};
+use crate::constants::{CONFIG_DIR_NAME, CONFIG_FILE, MIHOMO_LOG_FILE, SETTINGS_FILE};
+use crate::app::mihomo_log::MihomoLogView;
+use crate::operation_log::{LogType, OperationLogs};
 use crate::settings::Settings;
 use ratatui::widgets::TableState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
@@ -21,6 +23,7 @@ pub enum PopupMode {
     UrlInput,
     AgencySelect,
     HelpKey,
+    MihomoLog,
 }
 
 #[derive(Debug)]
@@ -35,12 +38,13 @@ pub struct App {
     pub config_path: PathBuf,
     pub settings: Settings,
     pub should_quit: bool,
-    pub logs: Logs,
+    pub logs: OperationLogs,
     pub log_state: TableState,
     pub url_input: String,
     pub popup_mode: PopupMode,
     pub is_test_delay: bool,
-    pub mihomo_running: bool,
+    pub mihomo_status: MihomoStatus,
+    pub mihomo_log: MihomoLogView,
     pub async_tx: mpsc::Sender<actions::AsyncTask>,
     pub async_rx: mpsc::Receiver<actions::AsyncTask>,
 }
@@ -80,12 +84,12 @@ impl App {
             }
         }
         let tun_enabled = config.tun.as_ref().map_or(false, |t| t.enable);
-        let mihomo_running = mihomo::is_mihomo_running(&settings);
+        let mihomo_status = mihomo::detect_status(&settings, &config_dir);
 
         Self {
             select_node: 0,
             select_provider,
-            proxy_running: get_proxy_status().map_or(false, |(v, _)| v == 1),
+            proxy_running: get_proxy_status().is_ok_and(|(v, _)| v == 1),
             tun_enabled,
             active_node: None,
             current_nodes: vec![],
@@ -93,43 +97,50 @@ impl App {
             config_path,
             settings,
             should_quit: false,
-            logs: Logs::new(),
+            logs: OperationLogs::new(),
             log_state: TableState::default(),
             url_input: String::new(),
             popup_mode: PopupMode::None,
             is_test_delay: false,
-            mihomo_running,
+            mihomo_status,
+            mihomo_log: MihomoLogView::new(config_dir.join(MIHOMO_LOG_FILE)),
             async_tx,
             async_rx,
         }
     }
 
+    fn config_dir(&self) -> &Path {
+        self.config_path.parent().unwrap_or(Path::new("."))
+    }
+
     pub fn start_mihomo(&mut self) {
         match mihomo::start_mihomo(&self.settings, &self.config_path) {
-            Ok(_) => {
-                self.mihomo_running = true;
-                self.logs.add_log(LogType::Info, "mihomo启动".to_string());
+            Ok(pid) => {
+                self.mihomo_status = MihomoStatus::RunningByUs(pid);
+                self.logs
+                    .add_log(LogType::Info, format!("mihomo 已启动 (PID {pid})"));
+                let tx = self.async_tx.clone();
+                actions::start_and_wait(tx, self.settings.clone());
             }
-            Err(e) => self.logs.add_log(LogType::Error, e.to_string()),
+            Err(e) => self.logs.add_log(LogType::Error, e),
         }
     }
 
     pub fn stop_mihomo(&mut self) {
-        match mihomo::stop_mihomo(&self.settings) {
+        let config_dir = self.config_dir().to_path_buf();
+        match mihomo::stop_mihomo(&self.settings, &config_dir) {
             Ok(_) => {
-                self.mihomo_running = false;
+                self.mihomo_status = MihomoStatus::Stopped;
                 self.logs.add_log(LogType::Info, "已停止mihomo".to_string());
             }
-            Err(e) => self.logs.add_log(LogType::Error, e.to_string()),
+            Err(e) => self.logs.add_log(LogType::Error, e),
         }
     }
 
     pub fn toggle_mihomo(&mut self) {
-        if mihomo::is_mihomo_running(&self.settings) {
-            self.stop_mihomo();
-        } else {
-            self.start_mihomo();
-            self.load_nodes();
+        match mihomo::detect_status(&self.settings, self.config_dir()) {
+            MihomoStatus::Stopped => self.start_mihomo(),
+            _ => self.stop_mihomo(),
         }
     }
 

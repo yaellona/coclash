@@ -2,7 +2,7 @@
 mod command;
 mod config;
 mod constants;
-mod log;
+mod operation_log;
 mod settings;
 #[cfg(test)]
 mod test;
@@ -14,7 +14,8 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 
 use app::msg::Msg;
-use log::{LogType};
+use command::mihomo::MihomoStatus;
+use operation_log::{LogType};
 
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
@@ -24,13 +25,16 @@ async fn main() -> Result<(), io::Error> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut app = app::App::new();
-    if app.mihomo_running {
-        app.logs
-            .add_log(LogType::Info, "检测到mihomo已在运行".to_string());
-    } else {
-        app.start_mihomo();
+    match app.mihomo_status {
+        MihomoStatus::Stopped => {
+            app.start_mihomo();
+        }
+        _ => {
+            app.logs
+                .add_log(LogType::Info, "检测到mihomo已在运行".to_string());
+            app.load_nodes();
+        }
     }
-    app.load_nodes();
     loop {
         terminal.draw(|f| app.draw(f))?;
         if let Some(key) = app::event::poll_event(&app.settings)? {

@@ -1,189 +1,80 @@
-﻿// use crate::command::mihomo::Mihomo;
-// use crate::command::system_proxy;
-// use crate::config::mihomo_config::MihomoConfig;
-// use std::fs;
-// use tempfile::TempDir;
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
+﻿use crate::command::mihomo;
+use crate::config::mihomo_config::MihomoConfig;
+use crate::settings::Settings;
+use std::io::Write;
 
-//     #[test]
-//     fn test_default_config() {
-//         let config = MihomoConfig::default_config();
-//         assert_eq!(config.port, 7890);
-//         assert_eq!(config.socks_port, 7891);
-//         assert!(config.allow_lan);
-//         assert_eq!(config.mode, "Rule");
-//         assert_eq!(config.log_level, "info");
-//         assert_eq!(config.external_controller, ":9090");
-//         assert!(config.unified_delay);
-//         assert_eq!(config.keep_alive_interval, 360);
-//         assert!(!config.clash_for_android.append_system_dns);
-//         assert!(config.sniffer.enable);
-//         assert_eq!(config.proxy_groups.len(), 1);
-//         assert_eq!(config.proxy_groups[0].name, "Proxy");
-//         assert!(config.proxy_providers.is_none());
-//         assert_eq!(config.rules.len(), 12);
-//     }
+#[test]
+fn test_pidfile_roundtrip() {
+    let dir = tempfile::TempDir::new().unwrap();
+    mihomo::save_pid(dir.path(), 12345).unwrap();
+    assert_eq!(mihomo::load_pidfile(dir.path()), Some(12345));
+    mihomo::clear_pidfile(dir.path());
+    assert_eq!(mihomo::load_pidfile(dir.path()), None);
+}
 
-//     #[test]
-//     fn test_yaml_roundtrip() {
-//         let config = MihomoConfig::default_config();
-//         let yaml = config.to_yaml().expect("序列化YAML失败");
-//         let config2 = MihomoConfig::from_yaml(&yaml).expect("反序列化YAML失败");
-//         assert_eq!(config.port, config2.port);
-//         assert_eq!(config.socks_port, config2.socks_port);
-//         assert_eq!(config.allow_lan, config2.allow_lan);
-//         assert_eq!(config.mode, config2.mode);
-//         assert_eq!(config.log_level, config2.log_level);
-//         assert_eq!(config.external_controller, config2.external_controller);
-//         assert_eq!(config.unified_delay, config2.unified_delay);
-//         assert_eq!(config.keep_alive_interval, config2.keep_alive_interval);
-//         assert_eq!(
-//             config.clash_for_android.append_system_dns,
-//             config2.clash_for_android.append_system_dns
-//         );
-//         assert_eq!(config.sniffer.enable, config2.sniffer.enable);
-//         assert_eq!(config.proxy_groups.len(), config2.proxy_groups.len());
-//         assert_eq!(config.proxy_groups[0].name, config2.proxy_groups[0].name);
-//         assert_eq!(config.rules.len(), config2.rules.len());
-//     }
+#[test]
+fn test_pidfile_invalid_content() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join(crate::constants::PID_FILE), "not-a-pid").unwrap();
+    assert_eq!(mihomo::load_pidfile(dir.path()), None);
+}
 
-//     #[test]
-//     fn test_file_roundtrip() {
-//         let config = MihomoConfig::default_config();
-//         let temp_dir = TempDir::new().expect("创建临时目录失败");
-//         let file_path = temp_dir.path().join("test_config.yaml");
+#[test]
+fn test_is_pid_alive() {
+    assert!(mihomo::is_pid_alive(std::process::id()));
+    assert!(!mihomo::is_pid_alive(u32::MAX));
+}
 
-//         // 由于write_to_file使用固定目录，我们需要修改测试方式
-//         // 我们直接测试序列化和文件写入
-//         let yaml = config.to_yaml().expect("序列化YAML失败");
-//         fs::write(&file_path, &yaml).expect("写入文件失败");
+#[test]
+fn test_config_yaml_roundtrip() {
+    let config = MihomoConfig::default_config(&Settings::default());
+    let yaml = config.to_yaml().unwrap();
+    let config2 = MihomoConfig::from_yaml(&yaml).unwrap();
+    assert_eq!(config.port, config2.port);
+    assert_eq!(config.socks_port, config2.socks_port);
+    assert_eq!(config.proxy_groups.len(), config2.proxy_groups.len());
+    assert_eq!(config.rules.len(), config2.rules.len());
+    assert_eq!(config.sniffer.enable, config2.sniffer.enable);
+}
 
-//         let content = fs::read_to_string(&file_path).expect("读取文件失败");
-//         let config2 = MihomoConfig::from_yaml(&content).expect("反序列化YAML失败");
+#[test]
+fn test_invalid_yaml() {
+    let err = MihomoConfig::from_yaml("invalid: yaml: content: [").unwrap_err();
+    assert!(err.contains("解析YAML失败"));
+}
 
-//         assert_eq!(config.port, config2.port);
-//         assert_eq!(config.socks_port, config2.socks_port);
-//         assert_eq!(config.allow_lan, config2.allow_lan);
-//         assert_eq!(config.mode, config2.mode);
-//         assert_eq!(config.log_level, config2.log_level);
-//         assert_eq!(config.external_controller, config2.external_controller);
-//         assert_eq!(config.unified_delay, config2.unified_delay);
-//         assert_eq!(config.keep_alive_interval, config2.keep_alive_interval);
-//         assert_eq!(
-//             config.clash_for_android.append_system_dns,
-//             config2.clash_for_android.append_system_dns
-//         );
-//         assert_eq!(config.sniffer.enable, config2.sniffer.enable);
-//         assert_eq!(config.proxy_groups.len(), config2.proxy_groups.len());
-//         assert_eq!(config.proxy_groups[0].name, config2.proxy_groups[0].name);
-//         assert_eq!(config.rules.len(), config2.rules.len());
-//     }
+#[test]
+fn test_insert_sub_dedup() {
+    let mut config = MihomoConfig::default_config(&Settings::default());
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("config.yaml");
+    config
+        .insert_sub("https://example.com/sub".to_string(), "订阅".to_string(), &path)
+        .unwrap();
+    config
+        .insert_sub("https://example.com/sub".to_string(), "订阅".to_string(), &path)
+        .unwrap();
+    let names: Vec<String> = config
+        .proxy_providers
+        .as_ref()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(names, vec!["订阅".to_string(), "订阅 (1)".to_string()]);
+}
 
-//     #[test]
-//     fn test_invalid_yaml() {
-//         let invalid_yaml = "invalid: yaml: content: [";
-//         let result = MihomoConfig::from_yaml(invalid_yaml);
-//         assert!(result.is_err());
-//         let err = result.unwrap_err();
-//         assert!(err.contains("解析YAML失败"));
-//     }
-
-//     // #[test]
-//     // fn test_insert_sub() {
-//     //     let mut config = MihomoConfig::default_config();
-//     //     assert!(config.proxy_providers.is_none());
-
-//     //     config.insert_sub("https://example.com/sub".to_string());
-//     //     assert!(config.proxy_providers.is_some());
-
-//     //     let providers = config.proxy_providers.as_ref().unwrap();
-//     //     assert_eq!(providers.len(), 1);
-
-//     //     let hash = format!("{:x}", md5::compute("https://example.com/sub"));
-//     //     assert!(providers.contains_key(&hash));
-
-//     //     let provider = providers.get(&hash).unwrap();
-//     //     assert_eq!(provider.provider_type, "http");
-//     //     assert_eq!(provider.url, "https://example.com/sub");
-//     //     assert_eq!(provider.interval, 3600);
-//     // }
-
-//     // #[test]
-//     // fn test_insert_sub_multiple() {
-//     //     let mut config = MihomoConfig::default_config();
-
-//     //     config.insert_sub("https://example.com/sub1".to_string());
-//     //     config.insert_sub("https://example.com/sub2".to_string());
-
-//     //     let providers = config.proxy_providers.as_ref().unwrap();
-//     //     assert_eq!(providers.len(), 2);
-
-//     //     let hash1 = format!("{:x}", md5::compute("https://example.com/sub1"));
-//     //     let hash2 = format!("{:x}", md5::compute("https://example.com/sub2"));
-
-//     //     assert!(providers.contains_key(&hash1));
-//     //     assert!(providers.contains_key(&hash2));
-//     // }
-//     #[test]
-//     fn test_write_to_path_and_read_from_path() {
-//         let config = MihomoConfig::default_config();
-//         let temp_dir = TempDir::new().expect("创建临时目录失败");
-//         let file_path = temp_dir.path().join("test_config.yaml");
-
-//         // 写入到指定路径
-//         config.write_to_path(&file_path).expect("写入文件失败");
-
-//         // 验证文件存在
-//         assert!(file_path.exists(), "配置文件应该存在");
-
-//         // 从指定路径读取
-//         let config2 = MihomoConfig::read_from_path(&file_path).expect("读取文件失败");
-
-//         // 验证配置内容
-//         assert_eq!(config.port, config2.port);
-//         assert_eq!(config.socks_port, config2.socks_port);
-//         assert_eq!(config.allow_lan, config2.allow_lan);
-//         assert_eq!(config.mode, config2.mode);
-//         assert_eq!(config.log_level, config2.log_level);
-//         assert_eq!(config.external_controller, config2.external_controller);
-//         assert_eq!(config.unified_delay, config2.unified_delay);
-//         assert_eq!(config.keep_alive_interval, config2.keep_alive_interval);
-//         assert_eq!(
-//             config.clash_for_android.append_system_dns,
-//             config2.clash_for_android.append_system_dns
-//         );
-//         assert_eq!(config.sniffer.enable, config2.sniffer.enable);
-//         assert_eq!(config.proxy_groups.len(), config2.proxy_groups.len());
-//         assert_eq!(config.proxy_groups[0].name, config2.proxy_groups[0].name);
-//         assert_eq!(config.rules.len(), config2.rules.len());
-//     }
-
-//     #[test]
-//     fn test_read_from_path_not_found() {
-//         let temp_dir = TempDir::new().expect("创建临时目录失败");
-//         let file_path = temp_dir.path().join("nonexistent.yaml");
-
-//         // 尝试读取不存在的文件
-//         let result = MihomoConfig::read_from_path(&file_path);
-//         assert!(result.is_err());
-//         let err = result.unwrap_err();
-//         assert!(err.contains("配置文件不存在"));
-//     }
-
-//     #[test]
-//     fn test_start_mihomo_config_not_found() {
-//         let temp_dir = TempDir::new().expect("创建临时目录失败");
-//         let config_dir: std::path::PathBuf = temp_dir.path().to_path_buf();
-//         let config_path = config_dir.join("mihomo-config.yaml");
-
-//         let mut mihomo = Mihomo::new("mihomo".to_string());
-
-//         // 配置文件不存在时应返回错误
-//         let result = mihomo.start_mihomo();
-//         assert!(result.is_err());
-//         let err = result.unwrap_err();
-//         assert!(err.contains("配置文件不存在"));
-//     }
-// }
+#[test]
+fn test_mihomo_log_tail() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("mihomo.log");
+    let mut f = std::fs::File::create(&path).unwrap();
+    for i in 0..100 {
+        writeln!(f, "line {i}").unwrap();
+    }
+    drop(f);
+    let lines = crate::app::mihomo_log::read_tail(&path, 128 * 1024, 10);
+    assert_eq!(lines.len(), 10);
+    assert_eq!(lines[0], "line 90");
+    assert_eq!(lines[9], "line 99");
+}

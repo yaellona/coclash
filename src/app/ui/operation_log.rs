@@ -1,4 +1,4 @@
-use crate::log::{LogType, Logs};
+use crate::operation_log::{LogType, OperationLogs};
 use ratatui::{
     layout::Constraint,
     style::{Color, Modifier, Style},
@@ -20,7 +20,6 @@ fn tag_style(t: &LogType) -> Style {
         LogType::Info => Color::LightBlue,
         LogType::Warn => Color::Yellow,
         LogType::Error => Color::Red,
-        LogType::Debug => Color::DarkGray,
     };
     let mut s = Style::default().fg(color);
     if matches!(t, LogType::Error) {
@@ -35,14 +34,12 @@ fn body_style(t: &LogType) -> Style {
         LogType::Info => Color::LightBlue,
         LogType::Warn => Color::LightYellow,
         LogType::Error => Color::LightRed,
-        LogType::Debug => Color::DarkGray,
     };
     Style::default().fg(color).add_modifier(Modifier::DIM)
 }
 
-pub fn render<'a>(logs: &Logs, width: usize) -> Table<'a> {
+pub fn render<'a>(logs: &OperationLogs, width: usize) -> Table<'a> {
     let rows: Vec<Row> = logs
-        .find_logs(None)
         .iter()
         .map(|log| {
             let wrapped = wrap_text(&log.msg, width as usize);
@@ -59,5 +56,5 @@ pub fn render<'a>(logs: &Logs, width: usize) -> Table<'a> {
     Table::new(rows, [Constraint::Length(5), Constraint::Min(0)])
         .highlight_symbol("")
         .row_highlight_style(Style::default())
-        .block(Block::default().title("日志").borders(Borders::ALL))
+        .block(Block::default().title("操作记录").borders(Borders::ALL))
 }

@@ -1,28 +1,143 @@
 use crate::config::node::ProxyReport;
-use crate::constants::SUBSCRIPTION_UA;
+use crate::constants::{MIHOMO_LOG_FILE, PID_FILE, SUBSCRIPTION_UA};
 use crate::settings::Settings;
 use reqwest;
 use std::collections::HashMap;
-#[cfg(unix)]
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+// ===== mihomo 运行状态 =====
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MihomoStatus {
+    Stopped,
+    /// 由本程序启动，记录 PID
+    RunningByUs(u32),
+    /// 端口被占用但无 PID 记录（外部启动的实例）
+    External,
+}
+
+// ===== pidfile =====
+
+fn pidfile_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(PID_FILE)
+}
+
+pub(crate) fn save_pid(config_dir: &Path, pid: u32) -> Result<(), String> {
+    fs::write(pidfile_path(config_dir), pid.to_string()).map_err(|e| format!("写入 PID 文件失败: {e}"))
+}
+
+pub(crate) fn load_pidfile(config_dir: &Path) -> Option<u32> {
+    fs::read_to_string(pidfile_path(config_dir))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+pub(crate) fn clear_pidfile(config_dir: &Path) {
+    let _ = fs::remove_file(pidfile_path(config_dir));
+}
+
+// ===== 进程探测 =====
+
+pub fn is_port_up(settings: &Settings) -> bool {
+    let addr: std::net::SocketAddr = match settings.mihomo_ctrl_addr.parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
+pub fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        windows_image_name(pid).is_some()
+    }
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+}
+
+/// PID 存活且确实是本程序启动的那个 mihomo（防止 pidfile 过期后 PID 被复用误杀）
+#[cfg_attr(target_os = "windows", allow(unused_variables))]
+fn is_mihomo_pid(settings: &Settings, config_dir: &Path, pid: u32) -> bool {
+    if !is_pid_alive(pid) {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        windows_image_name(pid)
+            .map(|img| img.eq_ignore_ascii_case(&mihomo_image_name(&settings.mihomo_exe)))
+            .unwrap_or(false)
+    }
+    #[cfg(unix)]
+    {
+        fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|c| {
+                let cmdline = String::from_utf8_lossy(&c);
+                cmdline.contains(config_dir.to_str().unwrap_or(""))
+            })
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(windows)]
+fn windows_image_name(pid: u32) -> Option<String> {
+    let output = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next()?;
+    if !line.contains(&pid.to_string()) {
+        return None;
+    }
+    line.trim_matches('"').split("\",\"").next().map(|s| s.to_string())
+}
+
+/// 综合端口与 PID 记录判断当前状态，同时清理过期的 pidfile
+pub fn detect_status(settings: &Settings, config_dir: &Path) -> MihomoStatus {
+    if let Some(pid) = load_pidfile(config_dir) {
+        if is_mihomo_pid(settings, config_dir, pid) {
+            return MihomoStatus::RunningByUs(pid);
+        }
+        clear_pidfile(config_dir);
+    }
+    if is_port_up(settings) {
+        MihomoStatus::External
+    } else {
+        MihomoStatus::Stopped
+    }
+}
+
 // ===== mihomo 进程管理 =====
 
-pub fn start_mihomo(settings: &Settings, config_path: &Path) -> Result<(), String> {
-    if is_mihomo_running(settings) {
-        return Ok(());
-    }
+pub fn start_mihomo(settings: &Settings, config_path: &Path) -> Result<u32, String> {
     let config_dir = config_path.parent().ok_or("无法获取配置目录")?;
+    if is_port_up(settings) {
+        return Err("端口已被 mihomo 占用，未启动新进程".to_string());
+    }
 
     let mut cmd = Command::new(&settings.mihomo_exe);
     cmd.args(["-d", config_dir.to_str().ok_or("config路径无效")?])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdin(Stdio::null());
+
+    // mihomo 的 stdout/stderr 重定向到日志文件，便于排查启动失败
+    let log_path = config_dir.join(MIHOMO_LOG_FILE);
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("打开日志文件失败: {e}"))?;
+    let file2 = file.try_clone().map_err(|e| format!("克隆日志文件失败: {e}"))?;
+    cmd.stdout(Stdio::from(file)).stderr(Stdio::from(file2));
 
     #[cfg(windows)]
     {
@@ -45,24 +160,73 @@ pub fn start_mihomo(settings: &Settings, config_path: &Path) -> Result<(), Strin
         }
     }
 
-    cmd.spawn()
-        .map_err(|e| format!("启动 mihomo 失败: {}", e))?;
+    let child = cmd.spawn().map_err(|e| format!("启动 mihomo 失败: {e}"))?;
+    let pid = child.id();
+    save_pid(config_dir, pid)?;
+    Ok(pid)
+}
+
+/// 只停止由本程序启动的 mihomo（依据 pidfile）；外部实例拒绝操作
+pub fn stop_mihomo(settings: &Settings, config_dir: &Path) -> Result<(), String> {
+    let pid = match load_pidfile(config_dir) {
+        Some(p) => p,
+        None => {
+            return Err(
+                "未找到由本程序启动的 mihomo（无 PID 记录）；若是外部启动的实例，请自行关闭"
+                    .to_string(),
+            )
+        }
+    };
+    if !is_mihomo_pid(settings, config_dir, pid) {
+        clear_pidfile(config_dir);
+        return Err(format!("PID 记录 ({pid}) 已失效（进程不存在或不是 mihomo），已清除记录"));
+    }
+    kill_pid(pid)?;
+    clear_pidfile(config_dir);
     Ok(())
 }
 
-pub fn stop_mihomo(settings: &Settings) -> Result<(), String> {
-    let image_name = mihomo_image_name(&settings.mihomo_exe);
-    kill_all_mihomo(&image_name)
-}
-
-// ===== 端口探测 =====
-
-pub fn is_mihomo_running(settings: &Settings) -> bool {
-    let addr: std::net::SocketAddr = match settings.mihomo_ctrl_addr.parse() {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+fn kill_pid(pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let output = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("执行 taskkill 失败: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "停止进程(PID {pid})失败: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
+    }
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while is_pid_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if is_pid_alive(pid) {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // waitpid 收割，防止僵尸进程
+        unsafe {
+            let mut status = 0;
+            libc::waitpid(pid as i32, &mut status, 0);
+        }
+        Ok(())
+    }
 }
 
 // ===== 查找 mihomo PID =====
@@ -113,63 +277,11 @@ pub fn tun_capability_warning() -> Option<String> {
     }
 }
 
-// ===== 跨平台：按映像名杀死所有 mihomo 进程 =====
-
 fn mihomo_image_name(mihomo_path: &str) -> String {
     std::path::Path::new(mihomo_path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| mihomo_path.to_string())
-}
-
-#[cfg(windows)]
-fn kill_all_mihomo(image_name: &str) -> Result<(), String> {
-    let output = Command::new("taskkill")
-        .args(["/F", "/T", "/IM", image_name])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("执行taskkill失败: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout}{stderr}");
-    if combined.to_lowercase().contains("not found") {
-        return Err("未找到 mihomo 进程".to_string());
-    }
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!("停止mihomo进程({image_name})失败: {combined}"))
-    }
-}
-
-#[cfg(unix)]
-fn kill_all_mihomo(_image_name: &str) -> Result<(), String> {
-    let mut killed = 0u32;
-    for entry in fs::read_dir("/proc")
-        .map_err(|e| format!("读取/proc失败: {e}"))?
-        .flatten()
-    {
-        let pid: u32 = match entry.file_name().to_string_lossy().parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let comm = match fs::read_to_string(entry.path().join("comm")) {
-            Ok(c) => c.trim().to_string(),
-            Err(_) => continue,
-        };
-        if comm != "mihomo" {
-            continue;
-        }
-        if unsafe { libc::kill(pid as i32, libc::SIGTERM) } == 0 {
-            killed += 1;
-        }
-    }
-    if killed == 0 {
-        Err("未找到 mihomo 进程".to_string())
-    } else {
-        Ok(())
-    }
 }
 
 // ===== 异步 API 调用 =====
@@ -243,12 +355,15 @@ pub async fn switch_node(settings: &Settings, node_name: String) -> Result<(), S
         .map_err(|e| e.to_string())?;
     let url = format!("{}/proxies/Proxy", settings.mihomo_api);
     let body = serde_json::json!({ "name": node_name });
-    client
+    let resp = client
         .put(url)
         .json(&body)
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("切换节点失败：API返回状态码 {}", resp.status()));
+    }
     Ok(())
 }
 
