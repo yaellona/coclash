@@ -13,9 +13,8 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 
-use app::msg::Msg;
 use command::mihomo::MihomoStatus;
-use operation_log::{LogType};
+use operation_log::LogType;
 
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
@@ -24,24 +23,25 @@ async fn main() -> Result<(), io::Error> {
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    let mut app = app::App::new();
-    match app.mihomo_status {
+    let (mut manager, mut windows) = app::Manager::new();
+    match manager.mihomo.status {
         MihomoStatus::Stopped => {
-            app.start_mihomo();
+            manager.start_mihomo();
         }
         _ => {
-            app.logs
-                .add_log(LogType::Info, "检测到mihomo已在运行".to_string());
-            app.load_nodes();
+            manager
+                .logs
+                .add(LogType::Info, "检测到mihomo已在运行".to_string());
+            manager.load_nodes();
         }
     }
     loop {
-        terminal.draw(|f| app.draw(f))?;
-        if let Some(key) = app::event::poll_event(&app.settings)? {
-            app.update(Msg::Key(key));
+        terminal.draw(|f| windows.draw(&mut manager, f))?;
+        if let Some(key) = app::event::poll_event(&manager.config.settings)? {
+            windows.handle_key(&mut manager, key);
         }
-        app.poll();
-        if app.should_quit {
+        manager.poll(&mut windows);
+        if manager.should_quit {
             break;
         }
     }

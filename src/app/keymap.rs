@@ -1,23 +1,23 @@
 use crate::app::ui::pages;
-use crate::app::{App, PopupMode};
+use crate::app::WindowId;
 use crossterm::event::KeyCode;
-pub use keymap_derive::keymap;
+pub use ui_derive::{popup, window};
 use std::sync::LazyLock;
 
-/// 一条按键绑定：作用模式 + 按键 + 帮助文案 + 处理器
+/// 一条按键绑定：所属窗口 + 按键 + 帮助文案。
 ///
-/// 由 `#[keymap]` 宏在各页面模块生成的注册表引用，字段名与宏约定一致。
+/// 纯元数据：按键分发由各窗口的 `handle_key` 完成，此处仅用于
+/// 帮助弹窗和底部栏的自动生成。
 #[derive(Clone, Copy)]
 pub struct Binding {
-    pub mode: PopupMode,
+    pub mode: WindowId,
     pub key: KeyCode,
     pub desc: &'static str,
     pub in_footer: bool,
-    pub run: fn(&mut App),
 }
 
-/// 全局按键注册表：聚合各页面的注册表。
-/// 各页面的按键定义在 `ui/pages/` 对应文件里，
+/// 全局按键注册表：聚合各窗口的注册表。
+/// 各窗口的按键定义在 `ui/pages/` 对应文件里（`#[window]` 声明），
 /// 这里只负责合并，帮助弹窗和底部栏据此自动生成。
 pub static BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
     let mut bindings = Vec::new();
@@ -53,8 +53,9 @@ pub fn key_label(key: KeyCode) -> String {
     }
 }
 
-/// 查表：命中返回绑定，未命中返回 None（由调用方做兜底逻辑）
-pub fn lookup(mode: PopupMode, key: KeyCode) -> Option<&'static Binding> {
+/// 查表：命中返回绑定（仅测试使用；运行时分发走各窗口的 handle_key）
+#[cfg(test)]
+pub fn lookup(mode: WindowId, key: KeyCode) -> Option<&'static Binding> {
     BINDINGS
         .iter()
         .find(|b| b.mode == mode && b.key == key)
@@ -75,14 +76,14 @@ fn collect_entries(filter: impl Fn(&Binding) -> bool) -> Vec<(String, &'static s
     entries
 }
 
-/// 帮助弹窗行：某模式下的全部按键（有描述才展示）
-pub fn help_rows(mode: PopupMode) -> Vec<(String, &'static str)> {
+/// 帮助弹窗行：某窗口下的全部按键（有描述才展示）
+pub fn help_rows(mode: WindowId) -> Vec<(String, &'static str)> {
     collect_entries(|b| b.mode == mode && !b.desc.is_empty())
 }
 
-/// 底部栏快捷键文案：主界面中标记 `footer` 的按键
+/// 底部栏快捷键文案：主窗口中标记 `footer` 的按键
 pub fn footer_text() -> String {
-    collect_entries(|b| b.mode == PopupMode::None && b.in_footer)
+    collect_entries(|b| b.mode == pages::main::MAIN && b.in_footer)
         .into_iter()
         .map(|(k, d)| format!("{k}: {d}"))
         .collect::<Vec<_>>()
@@ -96,18 +97,19 @@ mod tests {
     #[test]
     fn test_registry_has_main_bindings() {
         assert!(!BINDINGS.is_empty());
-        assert!(lookup(PopupMode::None, KeyCode::Char('q')).is_some());
-        assert!(lookup(PopupMode::None, KeyCode::Up).is_some());
-        assert!(lookup(PopupMode::None, KeyCode::Tab).is_some());
-        assert!(lookup(PopupMode::None, KeyCode::Esc).is_some());
-        assert!(lookup(PopupMode::None, KeyCode::PageDown).is_some());
-        assert!(lookup(PopupMode::UrlInput, KeyCode::Enter).is_some());
-        assert!(lookup(PopupMode::MihomoLog, KeyCode::PageDown).is_some());
-        assert!(lookup(PopupMode::HelpKey, KeyCode::Up).is_some());
-        assert!(lookup(PopupMode::HelpKey, KeyCode::Down).is_some());
-        assert!(lookup(PopupMode::HelpKey, KeyCode::PageDown).is_some());
-        assert!(lookup(PopupMode::None, KeyCode::Char('x')).is_none());
-        assert!(lookup(PopupMode::UrlInput, KeyCode::Char('q')).is_none());
+        let main = pages::main::MAIN;
+        assert!(lookup(main, KeyCode::Char('q')).is_some());
+        assert!(lookup(main, KeyCode::Up).is_some());
+        assert!(lookup(main, KeyCode::Tab).is_some());
+        assert!(lookup(main, KeyCode::Esc).is_some());
+        assert!(lookup(main, KeyCode::PageDown).is_some());
+        assert!(lookup(pages::url_input::URL_INPUT, KeyCode::Enter).is_some());
+        assert!(lookup(pages::mihomo_log::MIHOMO_LOG, KeyCode::PageDown).is_some());
+        assert!(lookup(pages::help::HELP, KeyCode::Up).is_some());
+        assert!(lookup(pages::help::HELP, KeyCode::Down).is_some());
+        assert!(lookup(pages::help::HELP, KeyCode::PageDown).is_some());
+        assert!(lookup(main, KeyCode::Char('x')).is_none());
+        assert!(lookup(pages::url_input::URL_INPUT, KeyCode::Char('q')).is_none());
     }
 
     #[test]
@@ -120,7 +122,7 @@ mod tests {
         assert!(!footer.contains("测速"));
         assert!(!footer.contains("TUN"));
         assert!(!footer.contains("切换面板"));
-        let rows = help_rows(PopupMode::None);
+        let rows = help_rows(pages::main::MAIN);
         assert!(rows.iter().any(|(_, d)| *d == "退出"));
         assert!(rows.iter().any(|(k, _)| k == "Enter"));
         assert!(rows.iter().any(|(_, d)| *d == "测速"));
@@ -130,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_run_handler() {
-        let binding = lookup(PopupMode::None, KeyCode::Char('q')).unwrap();
+        let binding = lookup(pages::main::MAIN, KeyCode::Char('q')).unwrap();
         assert_eq!(binding.desc, "退出");
         assert!(binding.in_footer);
     }

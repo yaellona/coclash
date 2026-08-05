@@ -1,63 +1,93 @@
-use crate::app::keymap::{Binding, help_rows, keymap};
-use crate::app::{App, PopupMode};
+use crate::app::Manager;
+use crate::app::keymap::{Binding, help_rows, popup};
+use crate::app::ui::{Popup, Window, WindowCtx};
 use crate::app::ui::pages::centered_rect;
+use crate::app::ui::pages::main::MAIN;
+use crate::app::WindowId;
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     layout::Constraint,
     style::{Color, Style},
-    widgets::{Block, Borders, Cell, Clear, Row, Table},
+    widgets::{Block, Borders, Cell, Clear, Row, Table, TableState},
 };
 use std::sync::LazyLock;
 
-/// 帮助页面按键
-#[keymap(name = "HELP_BINDINGS")]
-impl App {
-    #[key(KeyCode::Esc, mode = PopupMode::HelpKey, desc = "关闭")]
-    fn key_close_help(&mut self) {
-        self.popup_mode = PopupMode::None;
-    }
+/// 帮助窗口：表格滚动状态
+pub struct HelpWindow {
+    pub state: TableState,
+}
 
-    #[key(KeyCode::Up, mode = PopupMode::HelpKey, desc = "导航")]
-    fn key_help_up(&mut self) {
-        self.help_scroll_up();
-    }
-
-    #[key(KeyCode::Down, mode = PopupMode::HelpKey, desc = "导航")]
-    fn key_help_down(&mut self) {
-        self.help_scroll_down();
-    }
-
-    #[key(KeyCode::PageUp, mode = PopupMode::HelpKey, desc = "翻页")]
-    fn key_help_page_up(&mut self) {
-        self.help_page_up();
-    }
-
-    #[key(KeyCode::PageDown, mode = PopupMode::HelpKey, desc = "翻页")]
-    fn key_help_page_down(&mut self) {
-        self.help_page_down();
+impl HelpWindow {
+    pub(crate) fn new(_ctx: &WindowCtx) -> Self {
+        Self {
+            state: TableState::default(),
+        }
     }
 }
 
-pub fn draw(f: &mut Frame, app: &mut App) {
-    let area = centered_rect(50, 40, f.area());
-    f.render_widget(Clear, area);
-    let rows: Vec<Row> = help_rows(PopupMode::None)
-        .into_iter()
-        .map(|(key, desc)| {
-            Row::new(vec![Cell::from(key), Cell::from(desc.to_string())])
-        })
-        .collect();
+#[popup(name = "help")]
+impl HelpWindow {
+    #[key(KeyCode::Esc, desc = "关闭")]
+    fn key_close(&mut self, m: &mut Manager) {
+        m.current_window = MAIN;
+    }
 
-    let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(0)])
-        .highlight_symbol(">> ")
-        .row_highlight_style(Style::default().bg(Color::LightBlue))
-        .block(
-            Block::default()
-                .title("帮助")
-                .title_bottom("ESC退出，↑↓导航")
-                .borders(Borders::ALL),
-        );
+    #[key(KeyCode::Up, desc = "导航")]
+    fn key_help_up(&mut self, _m: &mut Manager) {
+        let row = self.state.selected().unwrap_or(0).saturating_sub(1);
+        self.state.select(Some(row));
+    }
 
-    f.render_stateful_widget(table, area, &mut app.help_state);
+    #[key(KeyCode::Down, desc = "导航")]
+    fn key_help_down(&mut self, _m: &mut Manager) {
+        let len = help_rows(MAIN).len();
+        let row = (self.state.selected().unwrap_or(0) + 1).min(len.saturating_sub(1));
+        self.state.select(Some(row));
+    }
+
+    #[key(KeyCode::PageUp, desc = "翻页")]
+    fn key_help_page_up(&mut self, _m: &mut Manager) {
+        let visible = self.state.offset().max(1);
+        let row = self.state.selected().unwrap_or(0).saturating_sub(visible);
+        self.state.select(Some(row));
+    }
+
+    #[key(KeyCode::PageDown, desc = "翻页")]
+    fn key_help_page_down(&mut self, _m: &mut Manager) {
+        let len = help_rows(MAIN).len();
+        let visible = self.state.offset().max(1);
+        let row = (self.state.selected().unwrap_or(0) + visible).min(len.saturating_sub(1));
+        self.state.select(Some(row));
+    }
+
+    /// 打开时回到第一行
+    #[on_open]
+    fn reset(&mut self, _m: &mut Manager) {
+        self.state.select(Some(0));
+    }
+
+    #[render]
+    fn draw(&mut self, _m: &mut Manager, f: &mut Frame) {
+        let area = centered_rect(50, 40, f.area());
+        f.render_widget(Clear, area);
+        let rows: Vec<Row> = help_rows(MAIN)
+            .into_iter()
+            .map(|(key, desc)| {
+                Row::new(vec![Cell::from(key), Cell::from(desc.to_string())])
+            })
+            .collect();
+
+        let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(0)])
+            .highlight_symbol(">> ")
+            .row_highlight_style(Style::default().bg(Color::LightBlue))
+            .block(
+                Block::default()
+                    .title("帮助")
+                    .title_bottom("ESC退出，↑↓导航")
+                    .borders(Borders::ALL),
+            );
+
+        f.render_stateful_widget(table, area, &mut self.state);
+    }
 }

@@ -1,6 +1,11 @@
-use crate::app::keymap::{Binding, keymap};
-use crate::app::{App, PopupMode};
+use crate::app::Manager;
+use crate::app::keymap::{Binding, popup};
+use crate::app::tasks;
+use crate::app::ui::{Popup, Window, WindowCtx};
 use crate::app::ui::pages::centered_rect;
+use crate::app::ui::pages::main::MAIN;
+use crate::app::WindowId;
+use crate::operation_log::LogType;
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
@@ -10,59 +15,88 @@ use ratatui::{
 };
 use std::sync::LazyLock;
 
-/// 添加订阅页面按键
-#[keymap(name = "URL_INPUT_BINDINGS")]
-impl App {
-    #[key(KeyCode::Esc, mode = PopupMode::UrlInput, desc = "取消")]
-    fn key_cancel_url_input(&mut self) {
-        self.popup_mode = PopupMode::None;
-        self.url_input.clear();
+/// 添加订阅窗口：输入框状态
+pub struct UrlInputWindow {
+    pub input: String,
+}
+
+impl UrlInputWindow {
+    pub(crate) fn new(_ctx: &WindowCtx) -> Self {
+        Self { input: String::new() }
     }
 
-    #[key(KeyCode::Enter, mode = PopupMode::UrlInput, desc = "确认")]
-    fn key_submit_url(&mut self) {
-        self.submit_url();
-    }
-
-    #[key(KeyCode::Backspace, mode = PopupMode::UrlInput, desc = "删除字符")]
-    fn key_backspace(&mut self) {
-        self.url_input.pop();
+    fn submit(&mut self, m: &mut Manager) {
+        if self.input.is_empty() {
+            return;
+        }
+        let url = self.input.clone();
+        m.current_window = MAIN;
+        self.input.clear();
+        m.logs.add(LogType::Info, "正在验证URL...".to_string());
+        tasks::insert_sub(m.tasks.tx.clone(), m.config.settings.clone(), url);
     }
 }
 
-pub fn draw(f: &mut Frame, app: &mut App) {
-    let area = centered_rect(60, 20, f.area());
+#[popup(name = "url_input")]
+impl UrlInputWindow {
+    #[key(KeyCode::Esc, desc = "取消")]
+    fn key_cancel(&mut self, m: &mut Manager) {
+        m.current_window = MAIN;
+        self.input.clear();
+    }
 
-    f.render_widget(Clear, area);
+    #[key(KeyCode::Enter, desc = "确认")]
+    fn key_submit(&mut self, m: &mut Manager) {
+        self.submit(m);
+    }
 
-    let block = Block::default()
-        .title("添加订阅 (Enter 确认, Esc 取消)")
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::White));
+    #[key(KeyCode::Backspace, desc = "删除字符")]
+    fn key_backspace(&mut self, _m: &mut Manager) {
+        self.input.pop();
+    }
 
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    #[fallback]
+    fn key_type(&mut self, _m: &mut Manager, key: KeyCode) {
+        if let KeyCode::Char(c) = key {
+            self.input.push(c);
+        }
+    }
 
-    let input_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1)])
-        .split(inner);
+    #[render]
+    fn draw(&mut self, _m: &mut Manager, f: &mut Frame) {
+        let area = centered_rect(60, 20, f.area());
 
-    let input_text = if app.url_input.is_empty() {
-        "请输入订阅 URL...".to_string()
-    } else {
-        format!("{}▌", app.url_input)
-    };
+        f.render_widget(Clear, area);
 
-    let style = if app.url_input.is_empty() {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default().fg(Color::White)
-    };
+        let block = Block::default()
+            .title("添加订阅 (Enter 确认, Esc 取消)")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::White));
 
-    let input = Paragraph::new(input_text)
-        .style(style)
-        .wrap(Wrap { trim: false });
+        let inner = block.inner(area);
+        f.render_widget(block, area);
 
-    f.render_widget(input, input_layout[0]);
+        let input_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1)])
+            .split(inner);
+
+        let input_text = if self.input.is_empty() {
+            "请输入订阅 URL...".to_string()
+        } else {
+            format!("{}▌", self.input)
+        };
+
+        let style = if self.input.is_empty() {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let input = Paragraph::new(input_text)
+            .style(style)
+            .wrap(Wrap { trim: false });
+
+        f.render_widget(input, input_layout[0]);
+    }
 }
