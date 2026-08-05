@@ -1033,6 +1033,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "keymap-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "lab"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2211,6 +2220,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "indexmap",
+ "keymap-derive",
  "libc",
  "ratatui",
  "reqwest",

@@ -1,3 +1,4 @@
+use crate::app::keymap;
 use crate::app::App;
 use crate::app::PopupMode;
 use crate::command::mihomo;
@@ -226,5 +227,74 @@ impl super::App {
         self.logs
             .add_log(LogType::Info, "正在验证URL...".to_string());
         insert_sub(self.async_tx.clone(), self.settings.clone(), url);
+    }
+
+    /// 操作日志当前选中行（0 起），日志为空时为 0
+    fn log_selected(&self) -> usize {
+        self.log_state
+            .selected()
+            .unwrap_or(self.logs.len().saturating_sub(1))
+            .min(self.logs.len().saturating_sub(1))
+    }
+
+    pub fn log_scroll_up(&mut self) {
+        self.log_follow = false;
+        let row = self.log_selected().saturating_sub(1);
+        self.log_state.select(Some(row));
+    }
+
+    pub fn log_scroll_down(&mut self) {
+        let max = self.logs.len().saturating_sub(1);
+        let row = (self.log_selected() + 1).min(max);
+        self.log_state.select(Some(row));
+        if row == max {
+            self.log_follow = true;
+        }
+    }
+
+    pub fn log_page_up(&mut self) {
+        self.log_follow = false;
+        let visible = self.log_state.offset().max(1);
+        let row = self.log_selected().saturating_sub(visible);
+        self.log_state.select(Some(row));
+    }
+
+    pub fn log_page_down(&mut self) {
+        let max = self.logs.len().saturating_sub(1);
+        let visible = self.log_state.offset().max(1);
+        let row = (self.log_selected() + visible).min(max);
+        self.log_state.select(Some(row));
+        if row == max {
+            self.log_follow = true;
+        }
+    }
+
+    /// 帮助弹窗当前选中行
+    fn help_selected(&self) -> usize {
+        self.help_state.selected().unwrap_or(0)
+    }
+
+    pub fn help_scroll_up(&mut self) {
+        let row = self.help_selected().saturating_sub(1);
+        self.help_state.select(Some(row));
+    }
+
+    pub fn help_scroll_down(&mut self) {
+        let len = keymap::help_rows(PopupMode::None).len();
+        let row = (self.help_selected() + 1).min(len.saturating_sub(1));
+        self.help_state.select(Some(row));
+    }
+
+    pub fn help_page_up(&mut self) {
+        let visible = self.help_state.offset().max(1);
+        let row = self.help_selected().saturating_sub(visible);
+        self.help_state.select(Some(row));
+    }
+
+    pub fn help_page_down(&mut self) {
+        let len = keymap::help_rows(PopupMode::None).len();
+        let visible = self.help_state.offset().max(1);
+        let row = (self.help_selected() + visible).min(len.saturating_sub(1));
+        self.help_state.select(Some(row));
     }
 }

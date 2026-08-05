@@ -38,7 +38,7 @@ fn body_style(t: &LogType) -> Style {
     Style::default().fg(color).add_modifier(Modifier::DIM)
 }
 
-pub fn render<'a>(logs: &OperationLogs, width: usize) -> Table<'a> {
+pub fn render(logs: &OperationLogs, width: usize, focused: bool) -> Table<'_> {
     let rows: Vec<Row> = logs
         .iter()
         .map(|log| {
@@ -53,8 +53,15 @@ pub fn render<'a>(logs: &OperationLogs, width: usize) -> Table<'a> {
         })
         .collect();
 
+    let border = if focused { Color::Yellow } else { Color::DarkGray };
+
     Table::new(rows, [Constraint::Length(5), Constraint::Min(0)])
         .highlight_symbol("")
         .row_highlight_style(Style::default())
-        .block(Block::default().title("操作记录").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("操作记录")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border)),
+        )
 }

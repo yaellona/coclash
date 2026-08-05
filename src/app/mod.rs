@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod event;
+pub mod keymap;
 pub mod mihomo_log;
 pub mod msg;
 pub mod ui;
@@ -17,13 +18,20 @@ use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PopupMode {
     None,
     UrlInput,
     AgencySelect,
     HelpKey,
     MihomoLog,
+}
+
+/// 主界面中哪个面板接收导航按键
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Focus {
+    Nodes,
+    Log,
 }
 
 #[derive(Debug)]
@@ -40,6 +48,9 @@ pub struct App {
     pub should_quit: bool,
     pub logs: OperationLogs,
     pub log_state: TableState,
+    pub log_follow: bool,
+    pub help_state: TableState,
+    pub focus: Focus,
     pub url_input: String,
     pub popup_mode: PopupMode,
     pub is_test_delay: bool,
@@ -99,6 +110,9 @@ impl App {
             should_quit: false,
             logs: OperationLogs::new(),
             log_state: TableState::default(),
+            log_follow: true,
+            help_state: TableState::default(),
+            focus: Focus::Nodes,
             url_input: String::new(),
             popup_mode: PopupMode::None,
             is_test_delay: false,
