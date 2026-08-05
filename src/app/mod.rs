@@ -114,7 +114,7 @@ impl App {
     }
 
     pub fn start_mihomo(&mut self) {
-        match mihomo::start_mihomo(&self.settings, &self.config_path) {
+        match mihomo::start_mihomo(&self.settings, &self.config_path, self.tun_enabled) {
             Ok((pid, binary)) => {
                 self.mihomo_status = MihomoStatus::RunningByUs(pid);
                 self.logs.add_log(

@@ -20,6 +20,16 @@ fn test_pidfile_invalid_content() {
 }
 
 #[test]
+fn test_pidfile_elevated_roundtrip() {
+    let dir = tempfile::TempDir::new().unwrap();
+    mihomo::save_pid_elevated(dir.path(), 12345).unwrap();
+    assert_eq!(mihomo::load_pidfile(dir.path()), Some(12345));
+    assert_eq!(mihomo::load_pidfile_elevated(dir.path()), Some((12345, true)));
+    mihomo::clear_pidfile(dir.path());
+    assert_eq!(mihomo::load_pidfile_elevated(dir.path()), None);
+}
+
+#[test]
 fn test_is_pid_alive() {
     assert!(mihomo::is_pid_alive(std::process::id()));
     assert!(!mihomo::is_pid_alive(u32::MAX));

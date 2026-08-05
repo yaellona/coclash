@@ -9,6 +9,37 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[cfg(windows)]
+use std::sync::{Mutex, OnceLock};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DuplicateHandle, ERROR_CANCELLED, GetLastError, HANDLE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetProcessId, PROCESS_QUERY_LIMITED_INFORMATION, TerminateProcess,
+};
+#[cfg(windows)]
+use windows_sys::Win32::UI::Shell::{
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    SHELLEXECUTEINFOW_0, ShellExecuteExW,
+};
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+/// 进程句柄在进程间共享是安全的（句柄值本身可被多个线程使用）
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct ProcessHandle(HANDLE);
+#[cfg(windows)]
+unsafe impl Send for ProcessHandle {}
+#[cfg(windows)]
+unsafe impl Sync for ProcessHandle {}
+
+/// 提权启动的 mihomo 进程句柄缓存（本进程生命周期内有效）
+#[cfg(windows)]
+static ELEVATED_PROCESS: OnceLock<Mutex<Option<(u32, ProcessHandle)>>> = OnceLock::new();
+
 // ===== mihomo 运行状态 =====
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +135,11 @@ pub(crate) fn resolve_mihomo_exe_with(
                     let cmd = if Path::new(&v).is_absolute() {
                         v
                     } else {
-                        path.parent().unwrap_or(Path::new(".")).join(&v).to_string_lossy().into_owned()
+                        path.parent()
+                            .unwrap_or(Path::new("."))
+                            .join(&v)
+                            .to_string_lossy()
+                            .into_owned()
                     };
                     return ResolvedBinary {
                         cmd,
@@ -166,15 +201,30 @@ fn pidfile_path(config_dir: &Path) -> PathBuf {
 }
 
 pub(crate) fn save_pid(config_dir: &Path, pid: u32) -> Result<(), String> {
-    fs::write(pidfile_path(config_dir), pid.to_string()).map_err(|e| format!("写入 PID 文件失败: {e}"))
+    fs::write(pidfile_path(config_dir), pid.to_string())
+        .map_err(|e| format!("写入 PID 文件失败: {e}"))
+}
+
+/// 记录提权启动的进程，pidfile 写入 `{pid}:1` 标记
+pub(crate) fn save_pid_elevated(config_dir: &Path, pid: u32) -> Result<(), String> {
+    fs::write(pidfile_path(config_dir), format!("{pid}:1"))
+        .map_err(|e| format!("写入 PID 文件失败: {e}"))
 }
 
 pub(crate) fn load_pidfile(config_dir: &Path) -> Option<u32> {
-    fs::read_to_string(pidfile_path(config_dir))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    load_pidfile_elevated(config_dir).map(|(pid, _)| pid)
+}
+
+/// 兼容旧格式纯数字 pidfile；返回 (pid, 是否提权)
+pub(crate) fn load_pidfile_elevated(config_dir: &Path) -> Option<(u32, bool)> {
+    let content = fs::read_to_string(pidfile_path(config_dir)).ok()?;
+    let content = content.trim();
+    if let Some((pid, flag)) = content.split_once(':') {
+        let pid: u32 = pid.trim().parse().ok()?;
+        return Some((pid, flag.trim() == "1"));
+    }
+    let pid: u32 = content.parse().ok()?;
+    Some((pid, false))
 }
 
 pub(crate) fn clear_pidfile(config_dir: &Path) {
@@ -243,7 +293,10 @@ fn windows_image_name(pid: u32) -> Option<String> {
     if !line.contains(&pid.to_string()) {
         return None;
     }
-    line.trim_matches('"').split("\",\"").next().map(|s| s.to_string())
+    line.trim_matches('"')
+        .split("\",\"")
+        .next()
+        .map(|s| s.to_string())
 }
 
 /// 综合端口与 PID 记录判断当前状态，同时清理过期的 pidfile
@@ -264,13 +317,102 @@ pub fn detect_status(settings: &Settings, config_dir: &Path) -> MihomoStatus {
 
 // ===== mihomo 进程管理 =====
 
-pub fn start_mihomo(settings: &Settings, config_path: &Path) -> Result<(u32, ResolvedBinary), String> {
+#[cfg(windows)]
+fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 通过 UAC 提示以管理员权限执行程序，返回 hProcess 句柄
+#[cfg(windows)]
+fn shell_run_elevated(file: &str, params: &str) -> Result<ProcessHandle, String> {
+    // 宽字符串须在 ShellExecuteExW 调用期间保持存活
+    let verb = to_wide("runas");
+    let file_w = to_wide(file);
+    let params_w = to_wide(params);
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        hwnd: std::ptr::null_mut(),
+        lpVerb: verb.as_ptr(),
+        lpFile: file_w.as_ptr(),
+        lpParameters: params_w.as_ptr(),
+        lpDirectory: std::ptr::null(),
+        nShow: SW_HIDE as i32,
+        hInstApp: std::ptr::null_mut(),
+        lpIDList: std::ptr::null_mut(),
+        lpClass: std::ptr::null(),
+        hkeyClass: std::ptr::null_mut(),
+        dwHotKey: 0,
+        Anonymous: SHELLEXECUTEINFOW_0 {
+            hMonitor: std::ptr::null_mut(),
+        },
+        hProcess: std::ptr::null_mut(),
+    };
+
+    if unsafe { ShellExecuteExW(&mut sei) } == 0 {
+        let err = unsafe { GetLastError() };
+        if err == ERROR_CANCELLED {
+            return Err("已取消管理员授权，mihomo 未启动".to_string());
+        }
+        return Err(format!("请求管理员权限失败 (错误码 {err})"));
+    }
+    Ok(ProcessHandle(sei.hProcess))
+}
+
+/// 从 ShellExecuteEx 返回的句柄解析 PID
+#[cfg(windows)]
+fn process_id_of(handle: ProcessHandle) -> Option<u32> {
+    let mut dup: HANDLE = std::ptr::null_mut();
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle.0,
+            GetCurrentProcess(),
+            &mut dup,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            0,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let pid = unsafe { GetProcessId(dup) };
+    unsafe { CloseHandle(dup) };
+    if pid == 0 { None } else { Some(pid) }
+}
+
+#[cfg(windows)]
+fn spawn_mihomo_elevated(binary: &ResolvedBinary, config_dir: &Path) -> Result<u32, String> {
+    let params = format!("-d \"{}\"", config_dir.to_string_lossy());
+    let handle = shell_run_elevated(&binary.cmd, &params)?;
+    let pid = process_id_of(handle).ok_or("无法获取提权进程 PID")?;
+    if let Ok(mut slot) = ELEVATED_PROCESS.get_or_init(|| Mutex::new(None)).lock() {
+        *slot = Some((pid, handle));
+    }
+    Ok(pid)
+}
+
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub fn start_mihomo(
+    settings: &Settings,
+    config_path: &Path,
+    elevate: bool,
+) -> Result<(u32, ResolvedBinary), String> {
     let config_dir = config_path.parent().ok_or("无法获取配置目录")?;
     if is_port_up(settings) {
         return Err("端口已被 mihomo 占用，未启动新进程".to_string());
     }
 
     let binary = resolve_mihomo_exe(settings);
+
+    #[cfg(windows)]
+    if elevate {
+        let pid = spawn_mihomo_elevated(&binary, config_dir)?;
+        save_pid_elevated(config_dir, pid)?;
+        return Ok((pid, binary));
+    }
+
     let mut cmd = Command::new(&binary.cmd);
     cmd.args(["-d", config_dir.to_str().ok_or("config路径无效")?])
         .stdin(Stdio::null());
@@ -282,7 +424,9 @@ pub fn start_mihomo(settings: &Settings, config_path: &Path) -> Result<(u32, Res
         .append(true)
         .open(&log_path)
         .map_err(|e| format!("打开日志文件失败: {e}"))?;
-    let file2 = file.try_clone().map_err(|e| format!("克隆日志文件失败: {e}"))?;
+    let file2 = file
+        .try_clone()
+        .map_err(|e| format!("克隆日志文件失败: {e}"))?;
     cmd.stdout(Stdio::from(file)).stderr(Stdio::from(file2));
 
     #[cfg(windows)]
@@ -314,28 +458,60 @@ pub fn start_mihomo(settings: &Settings, config_path: &Path) -> Result<(u32, Res
 
 /// 只停止由本程序启动的 mihomo（依据 pidfile）；外部实例拒绝操作
 pub fn stop_mihomo(settings: &Settings, config_dir: &Path) -> Result<(), String> {
-    let pid = match load_pidfile(config_dir) {
+    let (pid, elevated) = match load_pidfile_elevated(config_dir) {
         Some(p) => p,
         None => {
             return Err(
                 "未找到由本程序启动的 mihomo（无 PID 记录）；若是外部启动的实例，请自行关闭"
                     .to_string(),
-            )
+            );
         }
     };
     let binary = resolve_mihomo_exe(settings);
     if !is_mihomo_pid(&binary, config_dir, pid) {
         clear_pidfile(config_dir);
-        return Err(format!("PID 记录 ({pid}) 已失效（进程不存在或不是 mihomo），已清除记录"));
+        return Err(format!(
+            "PID 记录 ({pid}) 已失效（进程不存在或不是 mihomo），已清除记录"
+        ));
     }
-    kill_pid(pid)?;
+    kill_pid(pid, elevated)?;
     clear_pidfile(config_dir);
     Ok(())
 }
 
-fn kill_pid(pid: u32) -> Result<(), String> {
+#[cfg(windows)]
+fn cached_elevated_handle(pid: u32) -> Option<ProcessHandle> {
+    ELEVATED_PROCESS
+        .get()?
+        .lock()
+        .ok()?
+        .and_then(|slot| (slot.0 == pid).then_some(slot.1))
+}
+
+/// 提权执行 taskkill（句柄缓存失效时兜底，会再弹一次 UAC）
+#[cfg(windows)]
+fn kill_pid_via_runas(pid: u32) -> Result<(), String> {
+    shell_run_elevated("taskkill", &format!("/F /T /PID {pid}"))?;
+    Ok(())
+}
+
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn kill_pid(pid: u32, elevated: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
+        if elevated {
+            if let Some(handle) = cached_elevated_handle(pid) {
+                if unsafe { TerminateProcess(handle.0, 1) } != 0 {
+                    if let Some(cell) = ELEVATED_PROCESS.get() {
+                        if let Ok(mut slot) = cell.lock() {
+                            *slot = None;
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+            return kill_pid_via_runas(pid);
+        }
         let output = Command::new("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .stdin(Stdio::null())
