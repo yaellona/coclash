@@ -53,7 +53,7 @@ pub enum MihomoStatus {
 
 // ===== mihomo 二进制解析 =====
 
-pub const ENV_VAR_NAME: &str = "TECLASH_MIHOMO_EXE";
+pub const ENV_VAR_NAME: &str = "COCLASH_MIHOMO_EXE";
 pub const ENV_FILE_KEY: &str = "MIHOMO_EXE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

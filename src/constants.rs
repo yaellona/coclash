@@ -4,7 +4,7 @@
 pub const SUBSCRIPTION_UA: &str =
     concat!("mihomo-tui/v", env!("CARGO_PKG_VERSION"), " clash-verge");
 
-pub const CONFIG_DIR_NAME: &str = "teclash";
+pub const CONFIG_DIR_NAME: &str = "coclash";
 pub const CONFIG_FILE: &str = "config.yaml";
 pub const SETTINGS_FILE: &str = "settings.json";
 pub const PID_FILE: &str = "mihomo.pid";

@@ -1,5 +1,5 @@
 {
-  description = "teclash - mihomo kernel TUI";
+  description = "coclash - mihomo kernel TUI";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -21,7 +21,7 @@
       in
       {
         packages.default = rustPlatform.buildRustPackage {
-          pname = "teclash";
+          pname = "coclash";
           version = "0.1.0";
           src = lib.cleanSourceWith { src = ./.; };
           cargoLock.lockFile = ./Cargo.lock;
@@ -33,19 +33,19 @@
           buildInputs = [ pkgs.openssl ];
 
           postInstall = ''
-            wrapProgram $out/bin/teclash \
+            wrapProgram $out/bin/coclash \
               --prefix PATH : ${pkgs.mihomo}/bin
           '';
 
           meta = {
             description = "mihomo kernel TUI";
-            homepage = "https://github.com/yaellona/teclash";
+            homepage = "https://github.com/yaellona/coclash";
             license = lib.licenses.mit;
-            mainProgram = "teclash";
+            mainProgram = "coclash";
           };
         };
 
-        packages.teclash = self.packages.${system}.default;
+        packages.coclash = self.packages.${system}.default;
 
         devShells.default = pkgs.mkShell {
           inputsFrom = [ self.packages.${system}.default ];

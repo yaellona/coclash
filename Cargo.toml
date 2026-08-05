@@ -2,7 +2,7 @@
 members = ["ui-derive"]
 
 [package]
-name = "teclash"
+name = "coclash"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"

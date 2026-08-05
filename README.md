@@ -20,14 +20,14 @@
 
 ```nix
 # flake 输入
-inputs.teclash.url = "github:yaellona/teclash";
+inputs.coclash.url = "github:yaellona/coclash";
 
 # configuration.nix
-imports = [ inputs.teclash.nixosModules.default ];
-programs.teclash.enable = true;
+imports = [ inputs.coclash.nixosModules.default ];
+programs.coclash.enable = true;
 ```
 
-`enable` 后默认会给mihomo提供sudo权限，不需要再`sudo`给`teclash`了。
+`enable` 后默认会给mihomo提供sudo权限，不需要再`sudo`给`coclash`了。
 
 ### archlinux以及其他发行版
 
@@ -35,18 +35,18 @@ programs.teclash.enable = true;
 
 ## 用法
 
-首次进入`teclash`的时候，`mihomo`启动了≠能用了，如果发现读取`mihomo`端口失败了，说明`mihomo`还没有下载`GeoSite`数据库，需要等待一段时间下载数据库。
+首次进入`coclash`的时候，`mihomo`启动了≠能用了，如果发现读取`mihomo`端口失败了，说明`mihomo`还没有下载`GeoSite`数据库，需要等待一段时间下载数据库。
 
 ### Geo 数据源
 
-GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net`）下载，可在 `{config_dir}/teclash/config.yaml` 的 `geox-url` 字段自行更换（`geoip` / `geosite` / `mmdb` 三个键）。
+GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net`）下载，可在 `{config_dir}/coclash/config.yaml` 的 `geox-url` 字段自行更换（`geoip` / `geosite` / `mmdb` 三个键）。
 
 ### 进程管理
 
 - TUI 关闭时**不会**杀掉 mihomo 进程（进程与 TUI 解耦）。
-- 由 TUI 启动的 mihomo 会把 PID 记录在 `{config_dir}/teclash/mihomo.pid`，按 `s` 停止时只杀掉有 PID 记录的实例；外部启动的 mihomo（无 PID 记录）不会被误杀，需自行关闭。
+- 由 TUI 启动的 mihomo 会把 PID 记录在 `{config_dir}/coclash/mihomo.pid`，按 `s` 停止时只杀掉有 PID 记录的实例；外部启动的 mihomo（无 PID 记录）不会被误杀，需自行关闭。
 - 启动失败但进程残留时（端口未就绪），仍可按 `s` 停止。
-- mihomo 进程的 stdout/stderr 会写入 `{config_dir}/teclash/mihomo.log`，按 `l` 可在 TUI 内查看。
+- mihomo 进程的 stdout/stderr 会写入 `{config_dir}/coclash/mihomo.log`，按 `l` 可在 TUI 内查看。
 
 ## 界面展示
 
