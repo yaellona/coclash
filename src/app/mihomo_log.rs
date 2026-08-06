@@ -1,12 +1,15 @@
+use crate::app::ui::pages::wrap_lines;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;const MAX_TAIL_BYTES: u64 = 128 * 1024;
+use std::path::PathBuf;
+const MAX_TAIL_BYTES: u64 = 128 * 1024;
 const MAX_TAIL_LINES: usize = 500;
 
-/// mihomo 进程日志视图状态：tail 读取 + 滚动
+/// mihomo 进程日志视图状态：tail 读取 + 滚动（按换行后的显示行计）
 #[derive(Debug)]
 pub struct MihomoLogView {
     path: PathBuf,
-    pub lines: Vec<String>,
+    lines: Vec<String>,
+    pub rows: Vec<String>,
     pub scroll: usize,
     pub visible: usize,
     pub follow: bool,
@@ -18,6 +21,7 @@ impl MihomoLogView {
         Self {
             path,
             lines: vec![],
+            rows: vec![],
             scroll: 0,
             visible: 1,
             follow: true,
@@ -37,9 +41,14 @@ impl MihomoLogView {
         self.lines = read_tail(&self.path, MAX_TAIL_BYTES, MAX_TAIL_LINES);
     }
 
+    /// 按当前显示宽度把原始行折行为显示行
+    pub fn wrap(&mut self, width: usize) {
+        self.rows = wrap_lines(&self.lines, width);
+    }
+
     /// 根据可见行数把 scroll 收敛到合法范围
     pub fn clamp_scroll(&mut self) {
-        let max = self.lines.len().saturating_sub(self.visible);
+        let max = self.rows.len().saturating_sub(self.visible);
         if self.follow {
             self.scroll = max;
         } else {
@@ -53,7 +62,7 @@ impl MihomoLogView {
     }
 
     pub fn scroll_down(&mut self) {
-        let max = self.lines.len().saturating_sub(self.visible);
+        let max = self.rows.len().saturating_sub(self.visible);
         self.scroll = (self.scroll + 1).min(max);
         if self.scroll == max {
             self.follow = true;
@@ -66,7 +75,7 @@ impl MihomoLogView {
     }
 
     pub fn page_down(&mut self) {
-        let max = self.lines.len().saturating_sub(self.visible);
+        let max = self.rows.len().saturating_sub(self.visible);
         self.scroll = (self.scroll + self.visible.max(1)).min(max);
         if self.scroll == max {
             self.follow = true;

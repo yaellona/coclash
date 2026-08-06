@@ -1,7 +1,7 @@
 use crate::app::Manager;
 use crate::app::keymap::{Binding, help_rows, popup};
 use crate::app::ui::{Popup, Window, WindowCtx};
-use crate::app::ui::pages::centered_rect;
+use crate::app::ui::pages::popup_rect;
 use crate::app::ui::pages::main::MAIN;
 use crate::app::WindowId;
 use crossterm::event::KeyCode;
@@ -69,7 +69,7 @@ impl HelpWindow {
 
     #[render]
     fn draw(&mut self, _m: &mut Manager, f: &mut Frame) {
-        let area = centered_rect(50, 40, f.area());
+        let area = popup_rect(f.area());
         f.render_widget(Clear, area);
         let rows: Vec<Row> = help_rows(MAIN)
             .into_iter()

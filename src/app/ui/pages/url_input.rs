@@ -2,7 +2,7 @@ use crate::app::Manager;
 use crate::app::keymap::{Binding, popup};
 use crate::app::tasks;
 use crate::app::ui::{Popup, Window, WindowCtx};
-use crate::app::ui::pages::centered_rect;
+use crate::app::ui::pages::popup_rect;
 use crate::app::ui::pages::main::MAIN;
 use crate::app::WindowId;
 use crate::operation_log::LogType;
@@ -64,7 +64,7 @@ impl UrlInputWindow {
 
     #[render]
     fn draw(&mut self, _m: &mut Manager, f: &mut Frame) {
-        let area = centered_rect(60, 20, f.area());
+        let area = popup_rect(f.area());
 
         f.render_widget(Clear, area);
 

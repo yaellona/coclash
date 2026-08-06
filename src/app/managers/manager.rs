@@ -48,7 +48,6 @@ impl Manager {
             config: &config,
             config_dir: &config_dir,
         });
-        let tun_enabled = config.tun.as_ref().map_or(false, |t| t.enable);
         let status = mihomo::detect_status(&settings, &config_dir);
 
         let manager = Self {
@@ -63,7 +62,6 @@ impl Manager {
             mihomo: MihomoManager {
                 status,
                 proxy_running: get_proxy_status().is_ok_and(|(v, _)| v == 1),
-                tun_enabled,
                 active_node: None,
                 is_test_delay: false,
             },
@@ -81,11 +79,16 @@ impl Manager {
             .unwrap_or(Path::new("."))
     }
 
+    /// TUN 是否开启：实时读取 config.tun.enable（单一数据源）
+    pub fn tun_enabled(&self) -> bool {
+        self.config.config.tun.as_ref().is_some_and(|t| t.enable)
+    }
+
     pub fn start_mihomo(&mut self) {
         match mihomo::start_mihomo(
             &self.config.settings,
             &self.config.config_path,
-            self.mihomo.tun_enabled,
+            self.tun_enabled(),
         ) {
             Ok((pid, binary)) => {
                 self.mihomo.status = MihomoStatus::RunningByUs(pid);
@@ -143,14 +146,13 @@ impl Manager {
     }
 
     pub fn toggle_tun(&mut self) {
-        let new_state = !self.mihomo.tun_enabled;
+        let new_state = !self.tun_enabled();
         match self
             .config
             .config
             .set_tun_enabled(new_state, &self.config.config_path)
         {
             Ok(()) => {
-                self.mihomo.tun_enabled = new_state;
                 self.logs.add(
                     LogType::Info,
                     format!("TUN已{}", if new_state { "开启" } else { "关闭" }),

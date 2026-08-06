@@ -152,6 +152,11 @@ impl MainWindow {
         m.current_window = super::mihomo_log::MIHOMO_LOG;
     }
 
+    #[key('e', desc = "设置", footer)]
+    fn key_open_settings(m: &mut Manager) {
+        m.current_window = super::settings::SETTINGS;
+    }
+
     #[key(KeyCode::Enter, desc = "选中节点")]
     fn key_select_node(&mut self, m: &mut Manager) {
         if self.focus != Panel::Content {

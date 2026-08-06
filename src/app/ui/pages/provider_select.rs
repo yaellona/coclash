@@ -2,7 +2,7 @@ use crate::app::Manager;
 use crate::app::keymap::{Binding, popup};
 use crate::app::tasks;
 use crate::app::ui::{Popup, Window, WindowCtx};
-use crate::app::ui::pages::centered_rect;
+use crate::app::ui::pages::popup_rect;
 use crate::app::ui::pages::main::MAIN;
 use crate::app::WindowId;
 use crossterm::event::KeyCode;
@@ -107,7 +107,7 @@ impl ProviderSelectWindow {
 
     #[render]
     fn draw(&mut self, m: &mut Manager, f: &mut Frame) {
-        let area = centered_rect(60, 40, f.area());
+        let area = popup_rect(f.area());
 
         // 清除背景
         f.render_widget(Clear, area);

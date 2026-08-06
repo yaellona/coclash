@@ -53,7 +53,7 @@ impl RunningInfo {
             ]),
             Row::new(vec![
                 Cell::from("TUN".to_string()),
-                if m.mihomo.tun_enabled {
+                if m.tun_enabled() {
                     Cell::from("开启".to_string()).style(Color::LightGreen)
                 } else {
                     Cell::from("关闭".to_string()).style(Color::LightYellow)

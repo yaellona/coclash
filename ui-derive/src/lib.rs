@@ -1,10 +1,10 @@
 //! 过程宏：以 C# 特性（Attribute）的方式注册窗口（页面）和按键绑定。
 //!
 //! 三个属性宏：
-//! - `#[window(name = "main")]`：主窗口，生成 `impl Window`
+//! - `#[window(name = "main")]`：页面窗口（含主窗口），生成 `impl Window`
 //! - `#[popup(name = "url_input")]`：弹窗，生成 `impl Window + impl Popup`
-//! - `#[windows(base = main, popups = (url_input, ...))]`：挂在 `pub mod pages;`
-//!   上，一处清单生成 `Windows` 容器（结构体 + 构造 + 分发 + 绘制）
+//! - `#[windows(base = main, pages = (mihomo_log, ...), popups = (url_input, ...))]`：
+//!   挂在 `pub mod pages;` 上，一处清单生成 `Windows` 容器（结构体 + 构造 + 分发 + 绘制）
 //!
 //! `#[window]`/`#[popup]` 挂在窗口 struct 的 impl 块上，块内方法挂标记属性：
 //! - `#[key(KeyCode::Esc, desc = "取消")]`：按键处理器，可带 receiver
@@ -25,6 +25,9 @@
 //!
 //! `#[windows]` 要求窗口 struct 名为 `<PascalCase(name)>Window`，位于 `pages::<name>`
 //! 模块，且有 `pub(crate) fn new(ctx: &WindowCtx) -> Self`。
+//! - `base`：主窗口（弹窗叠加在它之上）
+//! - `pages`：其他全屏页面窗口（`#[window]` 声明，与 base 同级分发）
+//! - `popups`：弹窗（`#[popup]` 声明，覆盖在主窗口上）
 //!
 //! 生成代码要求展开处作用域内有 `Binding`、`WindowId`、`Window`、`Popup`、
 //! `WindowCtx`、`Manager`、`Frame`、`KeyCode`、`LazyLock`。
@@ -230,56 +233,72 @@ fn window_like_impl(attr: TokenStream2, item: TokenStream2, is_popup: bool) -> R
 
 struct WindowsArgs {
     base: String,
+    pages: Vec<Ident>,
     popups: Vec<Ident>,
 }
 
 impl Parse for WindowsArgs {
     fn parse(input: ParseStream) -> Result<Self> {
-        // 注意：rustc 在过程宏运行前就会按 Meta 解析属性内容，
-        // 关键字（如 main）不能作为元数据值，故 base 用字符串字面量
-        let ident: Ident = input.parse()?;
-        if ident != "base" {
-            return Err(Error::new(
-                ident.span(),
-                "期望 `base = \"<窗口名>\"`，例如 #[windows(base = \"main\", popups = (...))]",
-            ));
-        }
-        input.parse::<Token![=]>()?;
-        let base: LitStr = input.parse()?;
-        input.parse::<Token![,]>()?;
-
-        let ident: Ident = input.parse()?;
-        if ident != "popups" {
-            return Err(Error::new(
-                ident.span(),
-                "期望 `popups = (窗口名, ...)`",
-            ));
-        }
-        input.parse::<Token![=]>()?;
-        let content;
-        syn::parenthesized!(content in input);
-        let mut popups = Vec::new();
-        while !content.is_empty() {
-            popups.push(content.parse()?);
-            if content.is_empty() {
+        let mut args = WindowsArgs {
+            base: String::new(),
+            pages: Vec::new(),
+            popups: Vec::new(),
+        };
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            match ident.to_string().as_str() {
+                "base" => {
+                    if !args.base.is_empty() {
+                        return Err(Error::new(
+                            ident.span(),
+                            "`base` 只能出现一次，例如 base = \"main\"",
+                        ));
+                    }
+                    input.parse::<Token![=]>()?;
+                    let base: LitStr = input.parse()?;
+                    args.base = base.value();
+                }
+                "pages" | "popups" => {
+                    input.parse::<Token![=]>()?;
+                    let content;
+                    syn::parenthesized!(content in input);
+                    let mut list = Vec::new();
+                    while !content.is_empty() {
+                        list.push(content.parse()?);
+                        if content.is_empty() {
+                            break;
+                        }
+                        content.parse::<Token![,]>()?;
+                    }
+                    if ident == "pages" {
+                        args.pages = list;
+                    } else {
+                        args.popups = list;
+                    }
+                }
+                _ => {
+                    return Err(Error::new(
+                        ident.span(),
+                        "期望 `base = \"<窗口名>\"`、`pages = (窗口名, ...)` 或 `popups = (窗口名, ...)`",
+                    ));
+                }
+            }
+            if input.is_empty() {
                 break;
             }
-            content.parse::<Token![,]>()?;
-        }
-        if !input.is_empty() {
             input.parse::<Token![,]>()?;
         }
-        if !input.is_empty() {
-            return Err(input.error("多余的参数"));
+        if args.base.is_empty() {
+            return Err(Error::new(
+                input.span(),
+                "缺少 `base = \"<窗口名>\"` 参数",
+            ));
         }
-        Ok(WindowsArgs {
-            base: base.value(),
-            popups,
-        })
+        Ok(args)
     }
 }
 
-/// `#[windows(base = main, popups = (url_input, help, ...))]` 属性宏：
+/// `#[windows(base = "main", pages = (...), popups = (...))]` 属性宏：
 /// 挂在占位 item 上（会被消费掉），生成 `Windows` 容器 + 构造 + 按键分发 + 绘制。
 #[proc_macro_attribute]
 pub fn windows(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -298,35 +317,53 @@ fn windows_impl(attr: TokenStream2, item: TokenStream2) -> Result<TokenStream2> 
     let base_ty = format_ident!("{}Window", to_pascal_case(&base_name.to_string()));
     let base_id = format_ident!("{}", base_name.to_string().to_uppercase());
 
-    let mut fields = Vec::new();
-    let mut ctor = Vec::new();
+    // 页面窗口：base + pages，构造与按键/绘制分发统一处理
+    let mut window_fields = vec![quote! { pub #base_field: pages::#base_name::#base_ty }];
+    let mut window_ctor = vec![quote! { #base_field: pages::#base_name::#base_ty::new(ctx) }];
+    let mut window_key_arms = Vec::new();
+    let mut window_draw_arms = Vec::new();
+    for name in &args.pages {
+        let name_str = name.to_string();
+        let field = format_ident!("{}", name_str);
+        let ty = format_ident!("{}Window", to_pascal_case(&name_str));
+        let id = format_ident!("{}", name_str.to_uppercase());
+        window_fields.push(quote! { pub #field: pages::#name::#ty });
+        window_ctor.push(quote! { #field: pages::#name::#ty::new(ctx) });
+        window_key_arms.push(quote! { pages::#name::#id => self.#field.handle_key(m, key), });
+        window_draw_arms.push(quote! { pages::#name::#id => self.#field.draw(m, f), });
+    }
+    window_key_arms.push(quote! { pages::#base_name::#base_id => self.#base_field.handle_key(m, key), });
+    window_draw_arms.push(quote! { pages::#base_name::#base_id => self.#base_field.draw(m, f), });
+
+    let mut popup_fields = Vec::new();
+    let mut popup_ctor = Vec::new();
     let mut popup_arms = Vec::new();
     for name in &args.popups {
         let name_str = name.to_string();
         let field = format_ident!("{}", name_str);
         let ty = format_ident!("{}Window", to_pascal_case(&name_str));
         let id = format_ident!("{}", name_str.to_uppercase());
-        fields.push(quote! { pub #field: pages::#name::#ty });
-        ctor.push(quote! { #field: pages::#name::#ty::new(ctx) });
+        popup_fields.push(quote! { pub #field: pages::#name::#ty });
+        popup_ctor.push(quote! { #field: pages::#name::#ty::new(ctx) });
         popup_arms.push(quote! { pages::#name::#id => Some(&mut self.#field) });
     }
 
     let output = quote! {
-        /// 窗口管理器：持有全部窗口（主窗口 + 弹窗），负责按键分发与绘制。
+        /// 窗口管理器：持有全部页面窗口（主窗口 + 页面）与弹窗，负责按键分发与绘制。
         pub struct WindowsManager {
-            pub #base_field: pages::#base_name::#base_ty,
-            #(#fields,)*
+            #(#window_fields,)*
+            #(#popup_fields,)*
         }
 
         impl WindowsManager {
             pub fn new(ctx: &WindowCtx) -> Self {
                 Self {
-                    #base_field: pages::#base_name::#base_ty::new(ctx),
-                    #(#ctor,)*
+                    #(#window_ctor,)*
+                    #(#popup_ctor,)*
                 }
             }
 
-            /// 按窗口 ID 取弹窗实例（可变的 trait 对象）
+            /// 按弹窗 ID 取弹窗实例（可变的 trait 对象）
             pub fn popup_mut(&mut self, id: WindowId) -> Option<&mut dyn Popup> {
                 match id {
                     #(#popup_arms,)*
@@ -334,29 +371,35 @@ fn windows_impl(attr: TokenStream2, item: TokenStream2) -> Result<TokenStream2> 
                 }
             }
 
-            /// 按键分发：主窗口常驻；弹窗打开时由当前弹窗处理。
+            /// 按键分发：按当前窗口分发，弹窗打开时由其处理。
             /// 若按键处理期间切换到了弹窗，触发其 `on_open` 钩子。
             pub fn handle_key(&mut self, m: &mut Manager, key: KeyCode) {
                 let prev = m.current_window;
-                if prev == pages::#base_name::#base_id {
-                    self.#base_field.handle_key(m, key);
-                } else if let Some(p) = self.popup_mut(prev) {
-                    p.handle_key(m, key);
-                }
-                if m.current_window != prev && m.current_window != pages::#base_name::#base_id {
-                    if let Some(p) = self.popup_mut(m.current_window) {
-                        p.on_open(m);
+                match prev {
+                    #(#window_key_arms)*
+                    other => {
+                        if let Some(p) = self.popup_mut(other) {
+                            p.handle_key(m, key);
+                        }
                     }
+                }
+                if m.current_window != prev
+                    && let Some(p) = self.popup_mut(m.current_window)
+                {
+                    p.on_open(m);
                 }
             }
 
-            /// 绘制：主窗口常驻，弹窗作为覆盖层叠加其上
+            /// 绘制：页面窗口独占全屏；弹窗作为覆盖层叠加在主窗口之上
             pub fn draw(&mut self, m: &mut Manager, f: &mut Frame) {
-                self.#base_field.draw(m, f);
-                if m.current_window != pages::#base_name::#base_id
-                    && let Some(p) = self.popup_mut(m.current_window)
-                {
-                    p.draw(m, f);
+                match m.current_window {
+                    #(#window_draw_arms)*
+                    popup_id => {
+                        self.#base_field.draw(m, f);
+                        if let Some(p) = self.popup_mut(popup_id) {
+                            p.draw(m, f);
+                        }
+                    }
                 }
             }
         }
@@ -562,6 +605,30 @@ mod tests {
     fn test_windows_args_parse() {
         let args: WindowsArgs = parse_str(r#"base = "main", popups = (url_input, provider_select, help, mihomo_log)"#).unwrap();
         assert_eq!(args.base, "main");
+        assert!(args.pages.is_empty());
         assert_eq!(args.popups.len(), 4);
+    }
+
+    #[test]
+    fn test_windows_args_parse_with_pages() {
+        let args: WindowsArgs =
+            parse_str(r#"base = "main", pages = (mihomo_log), popups = (url_input, settings)"#)
+                .unwrap();
+        assert_eq!(args.base, "main");
+        assert_eq!(args.pages.len(), 1);
+        assert_eq!(args.popups.len(), 2);
+    }
+
+    #[test]
+    fn test_windows_args_pages_only() {
+        let args: WindowsArgs = parse_str(r#"base = "main", pages = (mihomo_log)"#).unwrap();
+        assert_eq!(args.base, "main");
+        assert_eq!(args.pages.len(), 1);
+        assert!(args.popups.is_empty());
+    }
+
+    #[test]
+    fn test_windows_args_missing_base() {
+        assert!(parse_str::<WindowsArgs>(r#"popups = (url_input)"#).is_err());
     }
 }

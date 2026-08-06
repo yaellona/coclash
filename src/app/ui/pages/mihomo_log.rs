@@ -1,7 +1,7 @@
 use crate::app::Manager;
-use crate::app::keymap::{Binding, popup};
+use crate::app::keymap::{Binding, window};
 use crate::app::mihomo_log::MihomoLogView;
-use crate::app::ui::{Popup, Window, WindowCtx};
+use crate::app::ui::{Window, WindowCtx};
 use crate::app::ui::pages::main::MAIN;
 use crate::app::WindowId;
 use crossterm::event::KeyCode;
@@ -12,7 +12,7 @@ use ratatui::{
 };
 use std::sync::LazyLock;
 
-/// mihomo 进程日志窗口：日志视图状态
+/// mihomo 进程日志窗口：全屏页面，长行自动换行
 pub struct MihomoLogWindow {
     pub view: MihomoLogView,
 }
@@ -25,7 +25,7 @@ impl MihomoLogWindow {
     }
 }
 
-#[popup(name = "mihomo_log")]
+#[window(name = "mihomo_log")]
 impl MihomoLogWindow {
     #[key(KeyCode::Esc, desc = "关闭")]
     fn key_close(&mut self, m: &mut Manager) {
@@ -67,14 +67,15 @@ impl MihomoLogWindow {
 
         view.visible = inner.height.saturating_sub(1) as usize;
         view.visible = view.visible.max(1);
+        view.wrap(inner.width.max(1) as usize);
         view.clamp_scroll();
 
-        let text = if view.lines.is_empty() {
+        let text = if view.rows.is_empty() {
             "（暂无日志，启动 mihomo 后自动生成）".to_string()
         } else {
-            let start = view.scroll.min(view.lines.len() - 1);
-            let end = (start + view.visible).min(view.lines.len());
-            view.lines[start..end].join("\n")
+            let start = view.scroll.min(view.rows.len() - 1);
+            let end = (start + view.visible).min(view.rows.len());
+            view.rows[start..end].join("\n")
         };
 
         let paragraph = Paragraph::new(text)

@@ -34,7 +34,17 @@ fn test_is_pid_alive() {
     assert!(mihomo::is_pid_alive(std::process::id()));
     assert!(!mihomo::is_pid_alive(u32::MAX));
 
-    let mut child = std::process::Command::new("true").spawn().unwrap();
+    // 保持存活约 2 秒的子进程：Windows 用 ping 延迟，Unix 用 true + sleep
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd")
+        .args(["/c", "ping 127.0.0.1 -n 3 >nul"])
+        .spawn()
+        .unwrap();
+    #[cfg(not(windows))]
+    let mut child = std::process::Command::new("sleep")
+        .arg("2")
+        .spawn()
+        .unwrap();
     let pid = child.id();
     assert!(mihomo::is_pid_alive(pid));
     child.wait().unwrap();

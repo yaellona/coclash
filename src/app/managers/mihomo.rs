@@ -5,7 +5,6 @@ use crate::command::mihomo::MihomoStatus;
 pub struct MihomoManager {
     pub status: MihomoStatus,
     pub proxy_running: bool,
-    pub tun_enabled: bool,
     pub active_node: Option<usize>,
     pub is_test_delay: bool,
 }

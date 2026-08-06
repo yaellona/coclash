@@ -26,6 +26,7 @@ pub static BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
     bindings.extend(pages::provider_select::PROVIDER_SELECT_BINDINGS.iter().copied());
     bindings.extend(pages::help::HELP_BINDINGS.iter().copied());
     bindings.extend(pages::mihomo_log::MIHOMO_LOG_BINDINGS.iter().copied());
+    bindings.extend(pages::settings::SETTINGS_BINDINGS.iter().copied());
     bindings
 });
 

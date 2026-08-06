@@ -13,7 +13,8 @@ pub mod pages;
 
 #[windows(
     base = "main",
-    popups = (url_input, provider_select, help, mihomo_log)
+    pages = (mihomo_log),
+    popups = (url_input, provider_select, help, settings)
 )]
 struct _WindowsList;
 
@@ -71,10 +72,7 @@ mod tests {
 
     #[test]
     fn test_focusable_components() {
-        assert_eq!(
-            focusable_names(),
-            vec!["content", "operation_log"]
-        );
+        assert_eq!(focusable_names(), vec!["content", "operation_log"]);
     }
 
     #[test]
