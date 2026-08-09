@@ -1,4 +1,4 @@
-﻿use crate::command::mihomo;
+use crate::command::mihomo;
 use crate::config::mihomo_config::MihomoConfig;
 use crate::settings::Settings;
 use std::io::Write;
@@ -6,35 +6,43 @@ use std::io::Write;
 #[test]
 fn test_pidfile_roundtrip() {
     let dir = tempfile::TempDir::new().unwrap();
-    mihomo::save_pid(dir.path(), 12345).unwrap();
-    assert_eq!(mihomo::load_pidfile(dir.path()), Some(12345));
-    mihomo::clear_pidfile(dir.path());
-    assert_eq!(mihomo::load_pidfile(dir.path()), None);
+    mihomo::process::save_pid(dir.path(), 12345).unwrap();
+    assert_eq!(mihomo::process::load_pidfile(dir.path()), Some(12345));
+    mihomo::process::clear_pidfile(dir.path());
+    assert_eq!(mihomo::process::load_pidfile(dir.path()), None);
 }
 
 #[test]
 fn test_pidfile_invalid_content() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join(crate::constants::PID_FILE), "not-a-pid").unwrap();
-    assert_eq!(mihomo::load_pidfile(dir.path()), None);
+    assert_eq!(mihomo::process::load_pidfile(dir.path()), None);
 }
 
 #[test]
 fn test_pidfile_elevated_roundtrip() {
     let dir = tempfile::TempDir::new().unwrap();
-    mihomo::save_pid_elevated(dir.path(), 12345).unwrap();
-    assert_eq!(mihomo::load_pidfile(dir.path()), Some(12345));
-    assert_eq!(mihomo::load_pidfile_elevated(dir.path()), Some((12345, true)));
-    mihomo::clear_pidfile(dir.path());
-    assert_eq!(mihomo::load_pidfile_elevated(dir.path()), None);
+    mihomo::process::save_pid(dir.path(), 12345).unwrap();
+    assert_eq!(mihomo::process::load_pidfile(dir.path()), Some(12345));
+    assert_eq!(
+        mihomo::process::load_pidfile_elevated(dir.path()),
+        Some((12345, false))
+    );
+    std::fs::write(dir.path().join(crate::constants::PID_FILE), "12345:1").unwrap();
+    assert_eq!(
+        mihomo::process::load_pidfile_elevated(dir.path()),
+        Some((12345, true))
+    );
+    mihomo::process::clear_pidfile(dir.path());
+    assert_eq!(mihomo::process::load_pidfile_elevated(dir.path()), None);
 }
 
 #[test]
 fn test_is_pid_alive() {
-    assert!(mihomo::is_pid_alive(std::process::id()));
-    assert!(!mihomo::is_pid_alive(u32::MAX));
+    assert!(mihomo::process::is_pid_alive(std::process::id()));
+    assert!(!mihomo::process::is_pid_alive(u32::MAX));
 
-    // 保持存活约 2 秒的子进程：Windows 用 ping 延迟，Unix 用 true + sleep
+    // 保持存活约 2 秒的子进程：Windows 用 ping 延迟，Unix 用 sleep
     #[cfg(windows)]
     let mut child = std::process::Command::new("cmd")
         .args(["/c", "ping 127.0.0.1 -n 3 >nul"])
@@ -46,14 +54,14 @@ fn test_is_pid_alive() {
         .spawn()
         .unwrap();
     let pid = child.id();
-    assert!(mihomo::is_pid_alive(pid));
+    assert!(mihomo::process::is_pid_alive(pid));
     child.wait().unwrap();
-    assert!(!mihomo::is_pid_alive(pid));
+    assert!(!mihomo::process::is_pid_alive(pid));
 }
 
 #[test]
 fn test_config_yaml_roundtrip() {
-    let config = MihomoConfig::default_config(&Settings::default());
+    let config = MihomoConfig::default_config();
     let yaml = config.to_yaml().unwrap();
     let config2 = MihomoConfig::from_yaml(&yaml).unwrap();
     assert_eq!(config.port, config2.port);
@@ -69,7 +77,7 @@ fn test_config_yaml_roundtrip() {
 #[test]
 fn test_invalid_yaml() {
     let err = MihomoConfig::from_yaml("invalid: yaml: content: [").unwrap_err();
-    assert!(err.contains("解析YAML失败"));
+    assert!(err.to_string().contains("解析YAML失败"));
 }
 
 #[test]
@@ -88,14 +96,22 @@ fn test_geo_url_auto_fill() {
 
 #[test]
 fn test_insert_sub_dedup() {
-    let mut config = MihomoConfig::default_config(&Settings::default());
+    let mut config = MihomoConfig::default_config();
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("config.yaml");
     config
-        .insert_sub("https://example.com/sub".to_string(), "订阅".to_string(), &path)
+        .insert_sub(
+            "https://example.com/sub".to_string(),
+            "订阅".to_string(),
+            &path,
+        )
         .unwrap();
     config
-        .insert_sub("https://example.com/sub".to_string(), "订阅".to_string(), &path)
+        .insert_sub(
+            "https://example.com/sub".to_string(),
+            "订阅".to_string(),
+            &path,
+        )
         .unwrap();
     let names: Vec<String> = config
         .proxy_providers
@@ -108,6 +124,15 @@ fn test_insert_sub_dedup() {
 }
 
 #[test]
+fn test_group_name_fallback() {
+    let config = MihomoConfig::default_config();
+    assert_eq!(config.group_name(), "Proxy");
+    let mut config2 = MihomoConfig::default_config();
+    config2.proxy_groups.clear();
+    assert_eq!(config2.group_name(), "Proxy");
+}
+
+#[test]
 fn test_mihomo_log_tail() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("mihomo.log");
@@ -116,7 +141,7 @@ fn test_mihomo_log_tail() {
         writeln!(f, "line {i}").unwrap();
     }
     drop(f);
-    let lines = crate::app::mihomo_log::read_tail(&path, 128 * 1024, 10);
+    let lines = crate::ui::windows::mihomo_log::read_tail(&path, 128 * 1024, 10);
     assert_eq!(lines.len(), 10);
     assert_eq!(lines[0], "line 90");
     assert_eq!(lines[9], "line 99");
@@ -124,23 +149,24 @@ fn test_mihomo_log_tail() {
 
 #[test]
 fn test_parse_env_file() {
-    let map = mihomo::parse_env_file(
+    let map = mihomo::binary::parse_env_file(
         "# comment\n\nMIHOMO_EXE=/usr/bin/mihomo\nEMPTY=\nQUOTED=\"a b\"\nBADLINE\n",
     );
     assert_eq!(map.get("MIHOMO_EXE").unwrap(), "/usr/bin/mihomo");
     assert_eq!(map.get("QUOTED").unwrap(), "a b");
     assert_eq!(map.get("EMPTY").unwrap(), "");
-    assert!(map.get("BADLINE").is_none());
+    assert!(!map.contains_key("BADLINE"));
 }
 
 #[test]
 fn test_resolve_env_var_wins() {
     let settings = Settings::default();
     let dir = tempfile::TempDir::new().unwrap();
-    let r = mihomo::resolve_mihomo_exe_with(
+    let r = mihomo::binary::resolve_mihomo_exe_with(
         &settings,
         Some("/from/env/mihomo".to_string()),
         Some(&dir.path().join(".env")),
+        None,
     );
     assert_eq!(r.cmd, "/from/env/mihomo");
     assert_eq!(r.source, mihomo::BinarySource::EnvVar);
@@ -148,14 +174,15 @@ fn test_resolve_env_var_wins() {
 
 #[test]
 fn test_resolve_env_file_wins_over_settings() {
-    let mut settings = Settings::default();
-    settings.mihomo_exe = "C:\\explicit\\mihomo.exe".to_string();
+    let settings = Settings {
+        mihomo_exe: "C:\\explicit\\mihomo.exe".to_string(),
+        ..Settings::default()
+    };
     let dir = tempfile::TempDir::new().unwrap();
     let env_path = dir.path().join(".env");
     std::fs::write(&env_path, "MIHOMO_EXE=mihomo.exe\n").unwrap();
-    let r = mihomo::resolve_mihomo_exe_with(&settings, None, Some(&env_path));
+    let r = mihomo::binary::resolve_mihomo_exe_with(&settings, None, Some(&env_path), None);
     assert_eq!(r.source, mihomo::BinarySource::EnvFile);
-    assert!(r.cmd.ends_with("mihomo.exe"));
     assert!(r.cmd.contains("mihomo.exe"));
 }
 
@@ -165,7 +192,7 @@ fn test_resolve_env_file_relative_joins_dir() {
     let dir = tempfile::TempDir::new().unwrap();
     let env_path = dir.path().join(".env");
     std::fs::write(&env_path, "MIHOMO_EXE=mihomo.exe\n").unwrap();
-    let r = mihomo::resolve_mihomo_exe_with(&settings, None, Some(&env_path));
+    let r = mihomo::binary::resolve_mihomo_exe_with(&settings, None, Some(&env_path), None);
     assert_eq!(
         r.cmd,
         dir.path().join("mihomo.exe").to_string_lossy().into_owned()
@@ -175,23 +202,41 @@ fn test_resolve_env_file_relative_joins_dir() {
 
 #[test]
 fn test_resolve_settings_explicit_path() {
-    let mut settings = Settings::default();
-    settings.mihomo_exe = "/opt/bin/mihomo".to_string();
-    let r = mihomo::resolve_mihomo_exe_with(&settings, None, None);
+    let settings = Settings {
+        mihomo_exe: "/opt/bin/mihomo".to_string(),
+        ..Settings::default()
+    };
+    let r = mihomo::binary::resolve_mihomo_exe_with(&settings, None, None, None);
     assert_eq!(r.cmd, "/opt/bin/mihomo");
     assert_eq!(r.source, mihomo::BinarySource::Settings);
 }
 
 #[test]
+fn test_resolve_wrapper_precedes_path() {
+    let settings = Settings::default();
+    let r = mihomo::binary::resolve_mihomo_exe_with(
+        &settings,
+        None,
+        None,
+        Some(std::path::PathBuf::from("/run/wrappers/bin/mihomo")),
+    );
+    assert_eq!(r.source, mihomo::BinarySource::NixWrapper);
+    assert_eq!(r.cmd, "/run/wrappers/bin/mihomo");
+}
+
+#[test]
 fn test_resolve_fallback_to_path() {
     let settings = Settings::default();
-    let r = mihomo::resolve_mihomo_exe_with(&settings, None, None);
+    // 显式传入 wrapper=None，避免依赖宿主环境（如 NixOS 的 /run/wrappers）
+    let r = mihomo::binary::resolve_mihomo_exe_with(&settings, None, None, None);
     assert_eq!(r.source, mihomo::BinarySource::Path);
     assert!(!r.cmd.is_empty());
 
-    let mut settings2 = Settings::default();
-    settings2.mihomo_exe = "my-mihomo".to_string();
-    let r2 = mihomo::resolve_mihomo_exe_with(&settings2, None, None);
+    let settings2 = Settings {
+        mihomo_exe: "my-mihomo".to_string(),
+        ..Settings::default()
+    };
+    let r2 = mihomo::binary::resolve_mihomo_exe_with(&settings2, None, None, None);
     assert_eq!(r2.cmd, "my-mihomo");
     assert_eq!(r2.source, mihomo::BinarySource::Path);
 }

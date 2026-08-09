@@ -1,21 +1,13 @@
-pub mod help;
-pub mod main;
-pub mod mihomo_log;
-pub mod provider_select;
-pub mod settings;
-pub mod url_input;
-
-use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-};
+//! 文本测量/折行与弹窗布局工具。
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// 简单显示宽度：ASCII 1，其余按 2（本项目文案只有 ASCII + CJK）
-pub(crate) fn display_width(s: &str) -> usize {
+pub fn display_width(s: &str) -> usize {
     s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
 }
 
 /// 按显示宽度逐字折行，返回展平后的行列表（空行保留为空字符串）
-pub(crate) fn wrap_lines(lines: &[String], width: usize) -> Vec<String> {
+pub fn wrap_lines(lines: &[String], width: usize) -> Vec<String> {
     let mut out = Vec::new();
     for line in lines {
         if width == 0 {
@@ -39,13 +31,17 @@ pub(crate) fn wrap_lines(lines: &[String], width: usize) -> Vec<String> {
     out
 }
 
-/// 全部弹窗统一尺寸（70% 宽 × 60% 高），如需调整只改这里
-pub(crate) fn popup_rect(r: Rect) -> Rect {
-    centered_rect(70, 60, r)
+/// 弹窗尺寸常量：70% 宽 × 60% 高
+const POPUP_WIDTH: u16 = 70;
+const POPUP_HEIGHT: u16 = 60;
+
+/// 全部弹窗统一尺寸，如需调整只改这里
+pub fn popup_rect(r: Rect) -> Rect {
+    centered_rect(POPUP_WIDTH, POPUP_HEIGHT, r)
 }
 
 /// 弹窗共用：居中区域
-pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

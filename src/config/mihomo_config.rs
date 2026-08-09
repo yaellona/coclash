@@ -1,12 +1,12 @@
-﻿use indexmap::IndexMap;
+use crate::constants::{
+    DEFAULT_CTRL_ADDR, DEFAULT_GROUP, DEFAULT_MIXED_PORT, DEFAULT_SOCKS_PORT, SUBSCRIPTION_UA,
+};
+use crate::error::Error;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serde_yaml;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-
-use crate::constants::SUBSCRIPTION_UA;
-use crate::settings::Settings;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MihomoConfig {
@@ -99,15 +99,35 @@ pub struct Tun {
     pub enable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
-    #[serde(default, rename = "dns-hijack", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "dns-hijack",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub dns_hijack: Option<Vec<String>>,
-    #[serde(default, rename = "auto-route", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "auto-route",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub auto_route: Option<bool>,
-    #[serde(default, rename = "auto-redirect", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "auto-redirect",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub auto_redirect: Option<bool>,
-    #[serde(default, rename = "auto-detect-interface", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "auto-detect-interface",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub auto_detect_interface: Option<bool>,
-    #[serde(default, rename = "strict-route", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "strict-route",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub strict_route: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u32>,
@@ -133,19 +153,43 @@ pub struct Dns {
     pub enable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
-    #[serde(default, rename = "enhanced-mode", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "enhanced-mode",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub enhanced_mode: Option<String>,
-    #[serde(default, rename = "fake-ip-range", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "fake-ip-range",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub fake_ip_range: Option<String>,
-    #[serde(default, rename = "fake-ip-filter", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "fake-ip-filter",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub fake_ip_filter: Option<Vec<String>>,
-    #[serde(default, rename = "default-nameserver", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "default-nameserver",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub default_nameserver: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nameserver: Option<Vec<String>>,
-    #[serde(default, rename = "proxy-server-nameserver", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "proxy-server-nameserver",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub proxy_server_nameserver: Option<Vec<String>>,
-    #[serde(default, rename = "nameserver-policy", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "nameserver-policy",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub nameserver_policy: Option<IndexMap<String, Vec<String>>>,
 }
 
@@ -205,14 +249,14 @@ pub struct ProxyProvider {
 }
 
 impl MihomoConfig {
-    pub fn default_config(settings: &Settings) -> Self {
+    pub fn default_config() -> Self {
         Self {
-            port: settings.mixed_port,
-            socks_port: settings.socks_port,
+            port: DEFAULT_MIXED_PORT,
+            socks_port: DEFAULT_SOCKS_PORT,
             allow_lan: true,
             mode: "Rule".to_string(),
             log_level: "info".to_string(),
-            external_controller: settings.external_controller.clone(),
+            external_controller: DEFAULT_CTRL_ADDR.to_string(),
             geox_url: GeoXUrl::default(),
             tun: None,
             dns: None,
@@ -240,7 +284,7 @@ impl MihomoConfig {
                 override_destination: true,
             },
             proxy_groups: vec![ProxyGroup {
-                name: "Proxy".to_string(),
+                name: DEFAULT_GROUP.to_string(),
                 group_type: "select".to_string(),
                 proxies: vec!["DIRECT".to_string()],
                 use_list: vec![],
@@ -263,6 +307,14 @@ impl MihomoConfig {
         }
     }
 
+    /// 策略组名（API 请求组相关端点用），兜底默认组
+    pub fn group_name(&self) -> &str {
+        self.proxy_groups
+            .first()
+            .map(|g| g.name.as_str())
+            .unwrap_or(DEFAULT_GROUP)
+    }
+
     pub fn provider_key_by_index(&self, index: usize) -> Option<String> {
         self.proxy_providers
             .as_ref()
@@ -279,27 +331,22 @@ impl MihomoConfig {
         &mut self,
         name: &str,
         config_path: &PathBuf,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let exists = self
             .proxy_providers
             .as_ref()
             .map(|providers| providers.contains_key(name))
             .unwrap_or(false);
         if !exists {
-            return Err(format!("代理商 '{}' 不存在", name));
+            return Err(Error::Config(format!("代理商 '{}' 不存在", name)));
         }
         if let Some(group) = self.proxy_groups.first_mut() {
             group.use_list = vec![name.to_string()];
         }
-        self.write_to_path(config_path)?;
-        Ok(())
+        self.write_to_path(config_path)
     }
 
-    pub fn set_tun_enabled(
-        &mut self,
-        enabled: bool,
-        config_path: &PathBuf,
-    ) -> Result<(), String> {
+    pub fn set_tun_enabled(&mut self, enabled: bool, config_path: &PathBuf) -> Result<(), Error> {
         if enabled {
             let tun = self.tun.get_or_insert_with(Tun::default_enabled);
             tun.enable = true;
@@ -307,8 +354,7 @@ impl MihomoConfig {
         } else if let Some(t) = self.tun.as_mut() {
             t.enable = false;
         }
-        self.write_to_path(config_path)?;
-        Ok(())
+        self.write_to_path(config_path)
     }
 
     pub fn insert_sub(
@@ -316,7 +362,7 @@ impl MihomoConfig {
         url: String,
         mut sub_name: String,
         config_path: &PathBuf,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         if self.proxy_providers.is_none() {
             self.proxy_providers = Some(IndexMap::new());
         }
@@ -346,33 +392,32 @@ impl MihomoConfig {
                 },
             );
         }
-        self.write_to_path(config_path)?;
-        Ok(())
+        self.write_to_path(config_path)
     }
 
-    pub fn from_yaml(yaml_str: &str) -> Result<Self, String> {
-        serde_yaml::from_str(yaml_str).map_err(|e| format!("解析YAML失败: {}", e))
+    pub fn from_yaml(yaml_str: &str) -> Result<Self, Error> {
+        serde_yaml::from_str(yaml_str).map_err(|e| Error::Config(format!("解析YAML失败: {e}")))
     }
 
-    pub fn to_yaml(&self) -> Result<String, String> {
-        serde_yaml::to_string(self).map_err(|e| format!("序列化YAML失败: {}", e))
+    pub fn to_yaml(&self) -> Result<String, Error> {
+        serde_yaml::to_string(self).map_err(|e| Error::Config(format!("序列化YAML失败: {e}")))
     }
 
-    pub fn read_from_file(config_path: &PathBuf) -> Result<Self, String> {
-        let content =
-            fs::read_to_string(config_path).map_err(|e| format!("读取文件失败: {}", e))?;
-
+    pub fn read_from_file(config_path: &PathBuf) -> Result<Self, Error> {
+        let content = fs::read_to_string(config_path)
+            .map_err(|e| Error::Config(format!("读取文件失败: {e}")))?;
         Self::from_yaml(&content)
     }
 
-    pub fn write_to_path(&self, config_path: &PathBuf) -> Result<(), String> {
-        if let Some(parent) = config_path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
-            }
+    pub fn write_to_path(&self, config_path: &PathBuf) -> Result<(), Error> {
+        if let Some(parent) = config_path.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent).map_err(|e| Error::Config(format!("创建目录失败: {e}")))?;
         }
         let yaml_str = self.to_yaml()?;
-        fs::write(config_path, yaml_str).map_err(|e| format!("写入文件失败: {}", e))?;
+        fs::write(config_path, yaml_str)
+            .map_err(|e| Error::Config(format!("写入文件失败: {e}")))?;
         Ok(())
     }
 }

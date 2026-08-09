@@ -9,3 +9,13 @@ pub const CONFIG_FILE: &str = "config.yaml";
 pub const SETTINGS_FILE: &str = "settings.json";
 pub const PID_FILE: &str = "mihomo.pid";
 pub const MIHOMO_LOG_FILE: &str = "mihomo.log";
+
+/// 默认监听端口（config.yaml 缺失时生成默认配置用）
+pub const DEFAULT_MIXED_PORT: u16 = 7890;
+pub const DEFAULT_SOCKS_PORT: u16 = 7891;
+/// mihomo external-controller 默认监听地址
+pub const DEFAULT_CTRL_ADDR: &str = ":9090";
+/// 默认策略组名（API 请求组相关端点用）
+pub const DEFAULT_GROUP: &str = "Proxy";
+/// 默认测速 URL
+pub const DEFAULT_TEST_URL: &str = "https://www.gstatic.com/generate_204";

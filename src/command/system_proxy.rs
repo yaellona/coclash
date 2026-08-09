@@ -1,7 +1,10 @@
 #[cfg(target_os = "windows")]
-use winreg::enums::*;
-#[cfg(target_os = "windows")]
 use winreg::RegKey;
+#[cfg(target_os = "windows")]
+use winreg::enums::*;
+
+/// 开启系统代理（仅 windows 支持，linux 走环境变量自行 source）
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 pub fn enable_proxy(proxy_addr: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -16,7 +19,7 @@ pub fn enable_proxy(proxy_addr: &str) -> std::io::Result<()> {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "windows"))]
     {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -24,6 +27,8 @@ pub fn enable_proxy(proxy_addr: &str) -> std::io::Result<()> {
         ))
     }
 }
+
+/// 关闭系统代理
 pub fn disable_proxy() -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -35,7 +40,8 @@ pub fn disable_proxy() -> std::io::Result<()> {
         internet_settings.set_value("ProxyEnable", &0u32)?;
         Ok(())
     }
-    #[cfg(target_os = "linux")]
+
+    #[cfg(not(target_os = "windows"))]
     {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -44,6 +50,7 @@ pub fn disable_proxy() -> std::io::Result<()> {
     }
 }
 
+/// 查询系统代理状态：返回 (ProxyEnable, ProxyServer)
 pub fn get_proxy_status() -> std::io::Result<(u32, String)> {
     #[cfg(target_os = "windows")]
     {
@@ -60,7 +67,7 @@ pub fn get_proxy_status() -> std::io::Result<(u32, String)> {
         Ok((enable, server))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "windows"))]
     {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,

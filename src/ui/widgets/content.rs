@@ -1,31 +1,16 @@
-use crate::app::ui::ComponentEntry;
+//! 节点列表组件：数据来自 AppState，本组件无状态。
 use crate::config::node::Node;
 use ratatui::{
     layout::Constraint,
     style::{Color, Style},
     widgets::{Block, Borders, Cell, Row, Table},
 };
-use ui_derive::component;
 
-/// 节点列表组件：节点数据 + 选中行
-#[component(focusable)]
-#[derive(Debug)]
-pub struct Content {
-    pub nodes: Vec<Node>,
-    pub select: usize,
-}
+pub struct Content;
 
 impl Content {
-    pub fn new() -> Self {
-        Self {
-            nodes: vec![],
-            select: 0,
-        }
-    }
-
-    pub fn render(&self, focused: bool) -> Table<'_> {
-        let rows: Vec<Row> = self
-            .nodes
+    pub fn render(nodes: &[Node], focused: bool) -> Table<'_> {
+        let rows: Vec<Row> = nodes
             .iter()
             .map(|node| {
                 Row::new(vec![
@@ -39,7 +24,11 @@ impl Content {
             .style(Style::default().fg(Color::Yellow))
             .bottom_margin(1);
 
-        let border = if focused { Color::Yellow } else { Color::DarkGray };
+        let border = if focused {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
 
         Table::new(rows, [Constraint::Min(10), Constraint::Length(6)])
             .header(header)

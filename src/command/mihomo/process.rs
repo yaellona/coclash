@@ -1,13 +1,14 @@
-use crate::config::node::ProxyReport;
-use crate::constants::{MIHOMO_LOG_FILE, PID_FILE, SUBSCRIPTION_UA};
+//! mihomo 进程管理：pidfile、端口/状态探测、启动/停止。
+use crate::constants::{MIHOMO_LOG_FILE, PID_FILE};
+use crate::error::Error;
 use crate::settings::Settings;
-use reqwest;
-use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::net::TcpStream;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+use super::binary::{ResolvedBinary, resolve_mihomo_exe};
 
 #[cfg(windows)]
 use std::sync::{Mutex, OnceLock};
@@ -51,164 +52,22 @@ pub enum MihomoStatus {
     External,
 }
 
-// ===== mihomo 二进制解析 =====
-
-pub const ENV_VAR_NAME: &str = "COCLASH_MIHOMO_EXE";
-pub const ENV_FILE_KEY: &str = "MIHOMO_EXE";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinarySource {
-    EnvVar,
-    EnvFile,
-    Settings,
-    #[cfg_attr(windows, allow(dead_code))]
-    NixWrapper,
-    Path,
-}
-
-impl BinarySource {
-    pub fn label(self) -> &'static str {
-        match self {
-            BinarySource::EnvVar => "环境变量",
-            BinarySource::EnvFile => "同目录 .env",
-            BinarySource::Settings => "settings.json",
-            BinarySource::NixWrapper => "NixOS wrapper",
-            BinarySource::Path => "PATH",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedBinary {
-    pub cmd: String,
-    pub source: BinarySource,
-}
-
-/// 解析 .env 内容（支持 # 注释、空行、可选的引号包裹）
-pub(crate) fn parse_env_file(content: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let v = v.trim().trim_matches('"').trim_matches('\'');
-        map.insert(k.trim().to_string(), v.to_string());
-    }
-    map
-}
-
-/// 解析链：环境变量 > 同目录 .env > settings 显式路径 > NixOS wrapper > PATH
-pub fn resolve_mihomo_exe(settings: &Settings) -> ResolvedBinary {
-    let env_val = std::env::var(ENV_VAR_NAME).ok();
-    let env_file = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.join(".env")));
-    resolve_mihomo_exe_with(settings, env_val, env_file.as_deref())
-}
-
-pub(crate) fn resolve_mihomo_exe_with(
-    settings: &Settings,
-    env_val: Option<String>,
-    env_file: Option<&Path>,
-) -> ResolvedBinary {
-    // 1. 环境变量（nix 模块 makeWrapper 注入）
-    if let Some(v) = env_val {
-        let v = v.trim().to_string();
-        if !v.is_empty() {
-            return ResolvedBinary {
-                cmd: v,
-                source: BinarySource::EnvVar,
-            };
-        }
-    }
-
-    // 2. 二进制同目录 .env 的 MIHOMO_EXE；相对值以 .env 所在目录为基准
-    if let Some(path) = env_file {
-        if let Ok(content) = fs::read_to_string(path) {
-            if let Some(v) = parse_env_file(&content).get(ENV_FILE_KEY) {
-                let v = v.trim().to_string();
-                if !v.is_empty() {
-                    let cmd = if Path::new(&v).is_absolute() {
-                        v
-                    } else {
-                        path.parent()
-                            .unwrap_or(Path::new("."))
-                            .join(&v)
-                            .to_string_lossy()
-                            .into_owned()
-                    };
-                    return ResolvedBinary {
-                        cmd,
-                        source: BinarySource::EnvFile,
-                    };
-                }
-            }
-        }
-    }
-
-    // 3. settings.json 显式路径（含分隔符，避免旧默认文件名遮蔽其他来源）
-    let settings_val = settings.mihomo_exe.trim().to_string();
-    if !settings_val.is_empty()
-        && (settings_val.contains('/')
-            || settings_val.contains('\\')
-            || Path::new(&settings_val).is_absolute())
-    {
-        return ResolvedBinary {
-            cmd: settings_val,
-            source: BinarySource::Settings,
-        };
-    }
-
-    // 4. NixOS setcap wrapper（独立于 shell PATH，任何启动方式都能命中）
-    #[cfg(unix)]
-    if Path::new("/run/wrappers/bin/mihomo").exists() {
-        return ResolvedBinary {
-            cmd: "/run/wrappers/bin/mihomo".to_string(),
-            source: BinarySource::NixWrapper,
-        };
-    }
-
-    // 5. PATH 兜底
-    let name = if settings_val.is_empty() {
-        default_mihomo_name().to_string()
-    } else {
-        settings_val
-    };
-    ResolvedBinary {
-        cmd: name,
-        source: BinarySource::Path,
-    }
-}
-
-#[cfg(windows)]
-fn default_mihomo_name() -> &'static str {
-    "mihomo.exe"
-}
-
-#[cfg(not(windows))]
-fn default_mihomo_name() -> &'static str {
-    "mihomo"
-}
-
 // ===== pidfile =====
 
 fn pidfile_path(config_dir: &Path) -> PathBuf {
     config_dir.join(PID_FILE)
 }
 
-pub(crate) fn save_pid(config_dir: &Path, pid: u32) -> Result<(), String> {
+pub(crate) fn save_pid(config_dir: &Path, pid: u32) -> Result<(), Error> {
     fs::write(pidfile_path(config_dir), pid.to_string())
-        .map_err(|e| format!("写入 PID 文件失败: {e}"))
+        .map_err(|e| Error::Process(format!("写入 PID 文件失败: {e}")))
 }
 
 /// 记录提权启动的进程，pidfile 写入 `{pid}:1` 标记
-pub(crate) fn save_pid_elevated(config_dir: &Path, pid: u32) -> Result<(), String> {
+#[cfg(windows)]
+pub(crate) fn save_pid_elevated(config_dir: &Path, pid: u32) -> Result<(), Error> {
     fs::write(pidfile_path(config_dir), format!("{pid}:1"))
-        .map_err(|e| format!("写入 PID 文件失败: {e}"))
+        .map_err(|e| Error::Process(format!("写入 PID 文件失败: {e}")))
 }
 
 pub(crate) fn load_pidfile(config_dir: &Path) -> Option<u32> {
@@ -231,14 +90,31 @@ pub(crate) fn clear_pidfile(config_dir: &Path) {
     let _ = fs::remove_file(pidfile_path(config_dir));
 }
 
-// ===== 进程探测 =====
+// ===== 端口 / 进程探测 =====
 
 pub fn is_port_up(settings: &Settings) -> bool {
-    let addr: std::net::SocketAddr = match settings.mihomo_ctrl_addr.parse() {
+    ctrl_addr_up(&settings.mihomo_ctrl_addr)
+}
+
+pub fn ctrl_addr_up(addr: &str) -> bool {
+    let addr: SocketAddr = match addr.parse() {
         Ok(a) => a,
         Err(_) => return false,
     };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
+pub async fn ctrl_addr_up_async(addr: &str) -> bool {
+    let addr: SocketAddr = match addr.parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok())
 }
 
 pub fn is_pid_alive(pid: u32) -> bool {
@@ -258,7 +134,6 @@ pub fn is_pid_alive(pid: u32) -> bool {
 }
 
 /// PID 存活且确实是本程序启动的那个 mihomo（防止 pidfile 过期后 PID 被复用误杀）
-#[cfg_attr(target_os = "windows", allow(unused_variables))]
 fn is_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path, pid: u32) -> bool {
     if !is_pid_alive(pid) {
         return false;
@@ -271,6 +146,7 @@ fn is_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path, pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
+        let _ = binary;
         fs::read(format!("/proc/{pid}/cmdline"))
             .map(|c| {
                 let cmdline = String::from_utf8_lossy(&c);
@@ -324,7 +200,7 @@ fn to_wide(s: &str) -> Vec<u16> {
 
 /// 通过 UAC 提示以管理员权限执行程序，返回 hProcess 句柄
 #[cfg(windows)]
-fn shell_run_elevated(file: &str, params: &str) -> Result<ProcessHandle, String> {
+fn shell_run_elevated(file: &str, params: &str) -> Result<ProcessHandle, Error> {
     // 宽字符串须在 ShellExecuteExW 调用期间保持存活
     let verb = to_wide("runas");
     let file_w = to_wide(file);
@@ -352,9 +228,11 @@ fn shell_run_elevated(file: &str, params: &str) -> Result<ProcessHandle, String>
     if unsafe { ShellExecuteExW(&mut sei) } == 0 {
         let err = unsafe { GetLastError() };
         if err == ERROR_CANCELLED {
-            return Err("已取消管理员授权，mihomo 未启动".to_string());
+            return Err(Error::Process(
+                "已取消管理员授权，mihomo 未启动".to_string(),
+            ));
         }
-        return Err(format!("请求管理员权限失败 (错误码 {err})"));
+        return Err(Error::Process(format!("请求管理员权限失败 (错误码 {err})")));
     }
     Ok(ProcessHandle(sei.hProcess))
 }
@@ -383,10 +261,10 @@ fn process_id_of(handle: ProcessHandle) -> Option<u32> {
 }
 
 #[cfg(windows)]
-fn spawn_mihomo_elevated(binary: &ResolvedBinary, config_dir: &Path) -> Result<u32, String> {
+fn spawn_mihomo_elevated(binary: &ResolvedBinary, config_dir: &Path) -> Result<u32, Error> {
     let params = format!("-d \"{}\"", config_dir.to_string_lossy());
     let handle = shell_run_elevated(&binary.cmd, &params)?;
-    let pid = process_id_of(handle).ok_or("无法获取提权进程 PID")?;
+    let pid = process_id_of(handle).ok_or(Error::Process("无法获取提权进程 PID".to_string()))?;
     if let Ok(mut slot) = ELEVATED_PROCESS.get_or_init(|| Mutex::new(None)).lock() {
         *slot = Some((pid, handle));
     }
@@ -398,10 +276,14 @@ pub fn start_mihomo(
     settings: &Settings,
     config_path: &Path,
     elevate: bool,
-) -> Result<(u32, ResolvedBinary), String> {
-    let config_dir = config_path.parent().ok_or("无法获取配置目录")?;
+) -> Result<(u32, ResolvedBinary), Error> {
+    let config_dir = config_path
+        .parent()
+        .ok_or(Error::Process("无法获取配置目录".to_string()))?;
     if is_port_up(settings) {
-        return Err("端口已被 mihomo 占用，未启动新进程".to_string());
+        return Err(Error::Process(
+            "端口已被 mihomo 占用，未启动新进程".to_string(),
+        ));
     }
 
     let binary = resolve_mihomo_exe(settings);
@@ -414,8 +296,13 @@ pub fn start_mihomo(
     }
 
     let mut cmd = Command::new(&binary.cmd);
-    cmd.args(["-d", config_dir.to_str().ok_or("config路径无效")?])
-        .stdin(Stdio::null());
+    cmd.args([
+        "-d",
+        config_dir
+            .to_str()
+            .ok_or(Error::Process("config路径无效".to_string()))?,
+    ])
+    .stdin(Stdio::null());
 
     // mihomo 的 stdout/stderr 重定向到日志文件，便于排查启动失败
     let log_path = config_dir.join(MIHOMO_LOG_FILE);
@@ -423,10 +310,10 @@ pub fn start_mihomo(
         .create(true)
         .append(true)
         .open(&log_path)
-        .map_err(|e| format!("打开日志文件失败: {e}"))?;
+        .map_err(|e| Error::Process(format!("打开日志文件失败: {e}")))?;
     let file2 = file
         .try_clone()
-        .map_err(|e| format!("克隆日志文件失败: {e}"))?;
+        .map_err(|e| Error::Process(format!("克隆日志文件失败: {e}")))?;
     cmd.stdout(Stdio::from(file)).stderr(Stdio::from(file2));
 
     #[cfg(windows)]
@@ -450,29 +337,31 @@ pub fn start_mihomo(
         }
     }
 
-    let child = cmd.spawn().map_err(|e| format!("启动 mihomo 失败: {e}"))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| Error::Process(format!("启动 mihomo 失败: {e}")))?;
     let pid = child.id();
     save_pid(config_dir, pid)?;
     Ok((pid, binary))
 }
 
 /// 只停止由本程序启动的 mihomo（依据 pidfile）；外部实例拒绝操作
-pub fn stop_mihomo(settings: &Settings, config_dir: &Path) -> Result<(), String> {
+pub fn stop_mihomo(settings: &Settings, config_dir: &Path) -> Result<(), Error> {
     let (pid, elevated) = match load_pidfile_elevated(config_dir) {
         Some(p) => p,
         None => {
-            return Err(
+            return Err(Error::Process(
                 "未找到由本程序启动的 mihomo（无 PID 记录）；若是外部启动的实例，请自行关闭"
                     .to_string(),
-            );
+            ));
         }
     };
     let binary = resolve_mihomo_exe(settings);
     if !is_mihomo_pid(&binary, config_dir, pid) {
         clear_pidfile(config_dir);
-        return Err(format!(
+        return Err(Error::Process(format!(
             "PID 记录 ({pid}) 已失效（进程不存在或不是 mihomo），已清除记录"
-        ));
+        )));
     }
     kill_pid(pid, elevated)?;
     clear_pidfile(config_dir);
@@ -490,13 +379,13 @@ fn cached_elevated_handle(pid: u32) -> Option<ProcessHandle> {
 
 /// 提权执行 taskkill（句柄缓存失效时兜底，会再弹一次 UAC）
 #[cfg(windows)]
-fn kill_pid_via_runas(pid: u32) -> Result<(), String> {
+fn kill_pid_via_runas(pid: u32) -> Result<(), Error> {
     shell_run_elevated("taskkill", &format!("/F /T /PID {pid}"))?;
     Ok(())
 }
 
 #[cfg_attr(not(windows), allow(unused_variables))]
-fn kill_pid(pid: u32, elevated: bool) -> Result<(), String> {
+fn kill_pid(pid: u32, elevated: bool) -> Result<(), Error> {
     #[cfg(windows)]
     {
         if elevated {
@@ -518,14 +407,14 @@ fn kill_pid(pid: u32, elevated: bool) -> Result<(), String> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .map_err(|e| format!("执行 taskkill 失败: {e}"))?;
+            .map_err(|e| Error::Process(format!("执行 taskkill 失败: {e}")))?;
         if output.status.success() {
             Ok(())
         } else {
-            Err(format!(
+            Err(Error::Process(format!(
                 "停止进程(PID {pid})失败: {}",
                 String::from_utf8_lossy(&output.stderr)
-            ))
+            )))
         }
     }
     #[cfg(unix)]
@@ -552,7 +441,7 @@ fn kill_pid(pid: u32, elevated: bool) -> Result<(), String> {
     }
 }
 
-// ===== 查找 mihomo PID =====
+// ===== 查找 mihomo PID（TUN 权限检查用）=====
 
 #[cfg(unix)]
 fn find_mihomo_pid(config_dir: &str) -> Option<u32> {
@@ -572,10 +461,10 @@ fn find_mihomo_pid(config_dir: &str) -> Option<u32> {
         if config_dir.is_empty() {
             return Some(pid);
         }
-        if let Ok(cmdline) = fs::read(base.join("cmdline")) {
-            if String::from_utf8_lossy(&cmdline).contains(config_dir) {
-                return Some(pid);
-            }
+        if let Ok(cmdline) = fs::read(base.join("cmdline"))
+            && String::from_utf8_lossy(&cmdline).contains(config_dir)
+        {
+            return Some(pid);
         }
     }
     None
@@ -600,171 +489,10 @@ pub fn tun_capability_warning() -> Option<String> {
     }
 }
 
+#[cfg(windows)]
 fn mihomo_image_name(mihomo_path: &str) -> String {
     std::path::Path::new(mihomo_path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| mihomo_path.to_string())
-}
-
-// ===== 异步 API 调用 =====
-
-pub async fn fetch_delays(settings: &Settings) -> Result<HashMap<String, u32>, String> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(settings.delay_http_timeout())
-        .build()
-        .map_err(|e| format!("创建HTTP客户端失败: {e}"))?;
-    let url = format!(
-        "{}/group/Proxy/delay?timeout={}&url={}",
-        settings.mihomo_api, settings.delay_timeout_ms, settings.test_url
-    );
-    let body = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("测速请求失败: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    serde_json::from_str::<HashMap<String, u32>>(&body).map_err(|e| format!("解析延迟失败: {e}"))
-}
-
-pub async fn reload_config(settings: &Settings, path: PathBuf) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(settings.http_timeout())
-        .build()
-        .map_err(|e| format!("创建HTTP客户端失败: {}", e))?;
-
-    let body = serde_json::json!({ "path": path.to_string_lossy(), "payload": "" });
-    let url = format!("{}/configs?force=true", settings.mihomo_api);
-    let resp = client
-        .put(url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("重载配置失败: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("重载配置失败：API返回状态码 {}", resp.status()));
-    }
-    Ok(())
-}
-
-pub async fn get_proxy(settings: &Settings) -> Result<ProxyReport, String> {
-    let client: reqwest::Client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .map_err(|e| e.to_string())?;
-    let url = format!("{}/proxies/Proxy", settings.mihomo_api);
-    let body = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())?;
-    let mihomo_report: ProxyReport =
-        serde_json::from_str(&body).map_err(|e| format!("解析节点失败: {e}"))?;
-    Ok(mihomo_report)
-}
-
-pub async fn switch_node(settings: &Settings, node_name: String) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .map_err(|e| e.to_string())?;
-    let url = format!("{}/proxies/Proxy", settings.mihomo_api);
-    let body = serde_json::json!({ "name": node_name });
-    let resp = client
-        .put(url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("切换节点失败：API返回状态码 {}", resp.status()));
-    }
-    Ok(())
-}
-
-// ===== 用flclash的方式来获取代理商的名称 =====
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("xx"),
-                16,
-            ) {
-                result.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(result).unwrap_or_default()
-}
-
-fn parse_content_disposition(cd: &str) -> Option<String> {
-    for part in cd.split(';') {
-        let p = part.trim();
-        if p.to_lowercase().starts_with("filename*=") {
-            let val = &p[10..];
-            let segs: Vec<&str> = val.split('\'').collect();
-            let encoded = if segs.len() >= 3 { segs[2] } else { val };
-            return Some(percent_decode(encoded));
-        }
-    }
-    for part in cd.split(';') {
-        let p = part.trim();
-        if p.to_lowercase().starts_with("filename=") {
-            let val = &p[9..];
-            return Some(val.trim_matches('"').trim_matches('\'').to_string());
-        }
-    }
-    None
-}
-
-pub async fn get_provider_name(settings: &Settings, url: String) -> Result<String, String> {
-    let domain = url::Url::parse(&url)
-        .ok()
-        .and_then(|u| u.host_str().map(|s| s.to_string()));
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(settings.delay_http_timeout())
-        .build()
-        .map_err(|e| format!("创建HTTP客户端失败: {e}"))?;
-    let resp = client
-        .get(&url)
-        .header("User-Agent", SUBSCRIPTION_UA)
-        .send()
-        .await;
-    let cd = match &resp {
-        Ok(resp) => resp
-            .headers()
-            .get("content-disposition")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or(""),
-        Err(e) => {
-            if let Some(d) = domain {
-                return Ok(d);
-            }
-            return Err(format!("请求失败: {e}"));
-        }
-    };
-    if let Some(name) = parse_content_disposition(cd) {
-        return Ok(name);
-    }
-    if let Some(d) = domain {
-        return Ok(d);
-    }
-    Err("无法解析订阅名称".to_string())
 }

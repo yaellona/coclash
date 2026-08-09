@@ -1,13 +1,9 @@
-use crate::app::ui::ComponentEntry;
+//! 底部栏组件（只读展示）。
 use ratatui::{
     style::{Color, Style},
     widgets::Paragraph,
 };
-use ui_derive::component;
 
-/// 底部栏组件（只读展示）
-#[component]
-#[derive(Debug)]
 pub struct Footer;
 
 impl Footer {
