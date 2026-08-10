@@ -1,4 +1,7 @@
-﻿mod app;
+﻿//! 过程宏 re-export：`#[window]`（窗口 impl 标注）+ `crate::windows!`（注册表）。
+pub use coclash_macros::{window, windows};
+
+mod app;
 mod command;
 mod config;
 mod constants;

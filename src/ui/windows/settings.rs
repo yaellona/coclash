@@ -2,8 +2,8 @@
 use crate::app::App;
 use crate::config::mihomo_config::{Dns, Tun};
 use crate::ui::Page;
-use crate::ui::keymap::Binding;
 use crate::ui::layout::{display_width, popup_rect};
+use crate::window;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -11,51 +11,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
-
-pub const BINDINGS: &[Binding] = &[
-    Binding {
-        mode: Page::Settings,
-        key: KeyCode::Esc,
-        desc: "保存并关闭",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Settings,
-        key: KeyCode::Enter,
-        desc: "编辑/切换",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Settings,
-        key: KeyCode::Up,
-        desc: "导航",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Settings,
-        key: KeyCode::Down,
-        desc: "导航",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Settings,
-        key: KeyCode::Char('r'),
-        desc: "规则",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Settings,
-        key: KeyCode::Char('a'),
-        desc: "添加规则",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Settings,
-        key: KeyCode::Char('d'),
-        desc: "删除规则",
-        in_footer: false,
-    },
-];
 
 /// 编辑缓冲：字段/规则编辑态共用（`rule: None` 表示新增规则）
 struct EditState {
@@ -90,8 +45,9 @@ pub struct SettingsWindow {
     changed: bool,
 }
 
+#[window(popup over Main)]
 impl SettingsWindow {
-    pub fn new() -> Self {
+    pub fn new(_app: &App) -> Self {
         Self {
             view: View::Fields,
             fields_select: 0,
@@ -291,80 +247,101 @@ impl SettingsWindow {
         self.editing = Some(EditState::rule(None, String::new()));
     }
 
-    pub fn handle_key(&mut self, app: &mut App, key: KeyEvent) -> Option<Page> {
-        match key.code {
-            KeyCode::Esc => {
-                if self.editing.is_some() {
-                    self.editing = None;
-                } else if self.view == View::Rules {
-                    self.view = View::Fields;
-                } else {
-                    self.close(app);
-                    return Some(Page::Main);
-                }
+    #[key(KeyCode::Esc, "保存并关闭", footer = false)]
+    fn esc(&mut self, app: &mut App) -> Option<Page> {
+        if self.editing.is_some() {
+            self.editing = None;
+            None
+        } else if self.view == View::Rules {
+            self.view = View::Fields;
+            None
+        } else {
+            self.close(app);
+            Some(Page::Main)
+        }
+    }
+
+    #[key(KeyCode::Enter, "编辑/切换", footer = false)]
+    fn enter(&mut self, app: &mut App) -> Option<Page> {
+        if self.editing.is_some() {
+            self.apply_edit(app);
+        } else {
+            match self.view {
+                View::Fields => self.toggle_field(app),
+                View::Rules => self.start_edit_rule(app),
             }
-            KeyCode::Enter => {
-                if self.editing.is_some() {
-                    self.apply_edit(app);
-                } else {
-                    match self.view {
-                        View::Fields => self.toggle_field(app),
-                        View::Rules => self.start_edit_rule(app),
-                    }
+        }
+        None
+    }
+
+    #[key(KeyCode::Up, "导航", footer = false)]
+    fn up(&mut self, app: &mut App) -> Option<Page> {
+        if self.editing.is_none() {
+            match self.view {
+                View::Fields => {
+                    self.fields_select = (self.fields_select + FIELD_COUNT - 1) % FIELD_COUNT;
                 }
+                View::Rules => self.navigate_rules(app, -1),
             }
-            KeyCode::Up => {
-                if self.editing.is_some() {
-                    return None;
-                }
-                match self.view {
-                    View::Fields => {
-                        self.fields_select = (self.fields_select + FIELD_COUNT - 1) % FIELD_COUNT;
-                    }
-                    View::Rules => self.navigate_rules(app, -1),
-                }
+        }
+        None
+    }
+
+    #[key(KeyCode::Down, "导航", footer = false)]
+    fn down(&mut self, app: &mut App) -> Option<Page> {
+        if self.editing.is_none() {
+            match self.view {
+                View::Fields => self.fields_select = (self.fields_select + 1) % FIELD_COUNT,
+                View::Rules => self.navigate_rules(app, 1),
             }
-            KeyCode::Down => {
-                if self.editing.is_some() {
-                    return None;
+        }
+        None
+    }
+
+    #[key(KeyCode::Char('r'), "规则", footer = false)]
+    fn show_rules(&mut self, _app: &mut App) -> Option<Page> {
+        if self.editing.is_none() && self.view == View::Fields {
+            self.view = View::Rules;
+        }
+        None
+    }
+
+    #[key(KeyCode::Char('a'), "添加规则", footer = false)]
+    fn add_rule(&mut self, app: &mut App) -> Option<Page> {
+        if self.editing.is_none() && self.view == View::Rules {
+            self.start_add_rule(app);
+        }
+        None
+    }
+
+    #[key(KeyCode::Char('d'), "删除规则", footer = false)]
+    fn remove_rule(&mut self, app: &mut App) -> Option<Page> {
+        if self.editing.is_none() && self.view == View::Rules {
+            self.delete_rule(app);
+        }
+        None
+    }
+
+    #[key(KeyCode::Char(_))]
+    fn input_char(&mut self, _app: &mut App, key: KeyEvent) -> Option<Page> {
+        if let Some(edit) = self.editing.as_mut()
+            && let KeyCode::Char(c) = key.code
+        {
+            if edit.rule.is_some() {
+                if edit.buffer.len() < 200 {
+                    edit.buffer.push(c);
                 }
-                match self.view {
-                    View::Fields => self.fields_select = (self.fields_select + 1) % FIELD_COUNT,
-                    View::Rules => self.navigate_rules(app, 1),
-                }
+            } else if c.is_ascii_digit() && edit.buffer.len() < 10 {
+                edit.buffer.push(c);
             }
-            KeyCode::Char('r') => {
-                if self.editing.is_none() && self.view == View::Fields {
-                    self.view = View::Rules;
-                }
-            }
-            KeyCode::Char('a') => {
-                if self.editing.is_none() && self.view == View::Rules {
-                    self.start_add_rule(app);
-                }
-            }
-            KeyCode::Char('d') => {
-                if self.editing.is_none() && self.view == View::Rules {
-                    self.delete_rule(app);
-                }
-            }
-            KeyCode::Char(c) => {
-                if let Some(edit) = self.editing.as_mut() {
-                    if edit.rule.is_some() {
-                        if edit.buffer.len() < 200 {
-                            edit.buffer.push(c);
-                        }
-                    } else if c.is_ascii_digit() && edit.buffer.len() < 10 {
-                        edit.buffer.push(c);
-                    }
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(edit) = self.editing.as_mut() {
-                    edit.buffer.pop();
-                }
-            }
-            _ => {}
+        }
+        None
+    }
+
+    #[key(KeyCode::Backspace)]
+    fn backspace(&mut self, _app: &mut App) -> Option<Page> {
+        if let Some(edit) = self.editing.as_mut() {
+            edit.buffer.pop();
         }
         None
     }

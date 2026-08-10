@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[workspace]
+members = [".", "coclash-macros"]
+
 [dependencies]
+coclash-macros = { path = "coclash-macros" }
 crossterm = "0.29.0"
 dirs = "6.0.0"
 indexmap = { version = "2", features = ["serde"] }

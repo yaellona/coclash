@@ -2,10 +2,10 @@
 use crate::app::App;
 use crate::constants::MIHOMO_LOG_FILE;
 use crate::ui::Page;
-use crate::ui::keymap::Binding;
 use crate::ui::layout::wrap_lines;
 use crate::ui::scroll::Scroller;
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::window;
+use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     style::{Color, Modifier, Style},
@@ -16,39 +16,6 @@ use std::path::PathBuf;
 
 const MAX_TAIL_BYTES: u64 = 128 * 1024;
 const MAX_TAIL_LINES: usize = 500;
-
-pub const BINDINGS: &[Binding] = &[
-    Binding {
-        mode: Page::MihomoLog,
-        key: KeyCode::Esc,
-        desc: "关闭",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::MihomoLog,
-        key: KeyCode::Up,
-        desc: "导航",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::MihomoLog,
-        key: KeyCode::Down,
-        desc: "导航",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::MihomoLog,
-        key: KeyCode::PageUp,
-        desc: "翻页",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::MihomoLog,
-        key: KeyCode::PageDown,
-        desc: "翻页",
-        in_footer: false,
-    },
-];
 
 pub struct MihomoLogWindow {
     path: PathBuf,
@@ -62,6 +29,7 @@ pub struct MihomoLogWindow {
     last_size: u64,
 }
 
+#[window]
 impl MihomoLogWindow {
     pub fn new(app: &App) -> Self {
         Self {
@@ -74,6 +42,8 @@ impl MihomoLogWindow {
         }
     }
 
+    pub fn on_open(&mut self) {}
+
     /// 文件有更新时重新读取尾部，跟随模式自动滚到底部
     fn refresh(&mut self) {
         let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
@@ -84,28 +54,35 @@ impl MihomoLogWindow {
         self.lines = read_tail(&self.path, MAX_TAIL_BYTES, MAX_TAIL_LINES);
     }
 
-    pub fn handle_key(&mut self, _app: &mut App, key: KeyEvent) -> Option<Page> {
+    #[key(KeyCode::Esc, "关闭", footer = false)]
+    fn close(&mut self, _app: &mut App) -> Option<Page> {
+        Some(Page::Main)
+    }
+
+    #[key(KeyCode::Up, "导航", footer = false)]
+    fn up(&mut self, _app: &mut App) -> Option<Page> {
+        self.scroller.up();
+        None
+    }
+
+    #[key(KeyCode::Down, "导航", footer = false)]
+    fn down(&mut self, _app: &mut App) -> Option<Page> {
         let total = self.rows.len();
-        match key.code {
-            KeyCode::Esc => Some(Page::Main),
-            KeyCode::Up => {
-                self.scroller.up();
-                None
-            }
-            KeyCode::Down => {
-                self.scroller.down(total);
-                None
-            }
-            KeyCode::PageUp => {
-                self.scroller.page_up(self.visible);
-                None
-            }
-            KeyCode::PageDown => {
-                self.scroller.page_down(total, self.visible);
-                None
-            }
-            _ => None,
-        }
+        self.scroller.down(total);
+        None
+    }
+
+    #[key(KeyCode::PageUp, "翻页", footer = false)]
+    fn page_up(&mut self, _app: &mut App) -> Option<Page> {
+        self.scroller.page_up(self.visible);
+        None
+    }
+
+    #[key(KeyCode::PageDown, "翻页", footer = false)]
+    fn page_down(&mut self, _app: &mut App) -> Option<Page> {
+        let total = self.rows.len();
+        self.scroller.page_down(total, self.visible);
+        None
     }
 
     pub fn draw(&mut self, _app: &mut App, f: &mut Frame) {

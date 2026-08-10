@@ -2,52 +2,20 @@
 use crate::app::App;
 use crate::config::mihomo_config::MihomoConfig;
 use crate::ui::Page;
-use crate::ui::keymap::Binding;
 use crate::ui::layout::popup_rect;
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::window;
+use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     style::{Color, Style},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-pub const BINDINGS: &[Binding] = &[
-    Binding {
-        mode: Page::ProviderSelect,
-        key: KeyCode::Esc,
-        desc: "取消",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::ProviderSelect,
-        key: KeyCode::Up,
-        desc: "导航",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::ProviderSelect,
-        key: KeyCode::Down,
-        desc: "导航",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::ProviderSelect,
-        key: KeyCode::Char('d'),
-        desc: "删除代理",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::ProviderSelect,
-        key: KeyCode::Enter,
-        desc: "确认",
-        in_footer: false,
-    },
-];
-
 pub struct ProviderSelectWindow {
     pub select: usize,
 }
 
+#[window(popup over Main)]
 impl ProviderSelectWindow {
     pub fn new(app: &App) -> Self {
         Self {
@@ -88,33 +56,35 @@ impl ProviderSelectWindow {
         }
     }
 
-    fn confirm(&mut self, app: &mut App) {
+    #[key(KeyCode::Esc, "取消", footer = false)]
+    fn cancel(&mut self, _app: &mut App) -> Option<Page> {
+        Some(Page::Main)
+    }
+
+    #[key(KeyCode::Up, "导航", footer = false)]
+    fn up(&mut self, app: &mut App) -> Option<Page> {
+        self.navigate(app, -1);
+        None
+    }
+
+    #[key(KeyCode::Down, "导航", footer = false)]
+    fn down(&mut self, app: &mut App) -> Option<Page> {
+        self.navigate(app, 1);
+        None
+    }
+
+    #[key(KeyCode::Char('d'), "删除代理", footer = false)]
+    fn remove_provider(&mut self, app: &mut App) -> Option<Page> {
+        self.delete_current(app);
+        None
+    }
+
+    #[key(KeyCode::Enter, "确认", footer = false)]
+    fn confirm(&mut self, app: &mut App) -> Option<Page> {
         if let Some(name) = app.state.config.provider_key_by_index(self.select) {
             app.switch_provider(name);
         }
-    }
-
-    pub fn handle_key(&mut self, app: &mut App, key: KeyEvent) -> Option<Page> {
-        match key.code {
-            KeyCode::Esc => Some(Page::Main),
-            KeyCode::Up => {
-                self.navigate(app, -1);
-                None
-            }
-            KeyCode::Down => {
-                self.navigate(app, 1);
-                None
-            }
-            KeyCode::Char('d') => {
-                self.delete_current(app);
-                None
-            }
-            KeyCode::Enter => {
-                self.confirm(app);
-                Some(Page::Main)
-            }
-            _ => None,
-        }
+        Some(Page::Main)
     }
 
     pub fn draw(&mut self, app: &mut App, f: &mut Frame) {

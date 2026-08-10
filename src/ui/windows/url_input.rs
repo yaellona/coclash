@@ -1,8 +1,8 @@
 //! 添加订阅窗口：输入框状态。
 use crate::app::App;
 use crate::ui::Page;
-use crate::ui::keymap::Binding;
 use crate::ui::layout::popup_rect;
+use crate::window;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -11,33 +11,13 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-pub const BINDINGS: &[Binding] = &[
-    Binding {
-        mode: Page::UrlInput,
-        key: KeyCode::Esc,
-        desc: "取消",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::UrlInput,
-        key: KeyCode::Enter,
-        desc: "确认",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::UrlInput,
-        key: KeyCode::Backspace,
-        desc: "删除字符",
-        in_footer: false,
-    },
-];
-
 pub struct UrlInputWindow {
     pub input: String,
 }
 
+#[window(popup over Main)]
 impl UrlInputWindow {
-    pub fn new() -> Self {
+    pub fn new(_app: &App) -> Self {
         Self {
             input: String::new(),
         }
@@ -45,31 +25,35 @@ impl UrlInputWindow {
 
     pub fn on_open(&mut self) {}
 
-    pub fn handle_key(&mut self, app: &mut App, key: KeyEvent) -> Option<Page> {
-        match key.code {
-            KeyCode::Esc => {
-                self.input.clear();
-                Some(Page::Main)
-            }
-            KeyCode::Enter => {
-                if self.input.is_empty() {
-                    return None;
-                }
-                let url = self.input.clone();
-                app.insert_sub(url);
-                self.input.clear();
-                Some(Page::Main)
-            }
-            KeyCode::Backspace => {
-                self.input.pop();
-                None
-            }
-            KeyCode::Char(c) => {
-                self.input.push(c);
-                None
-            }
-            _ => None,
+    #[key(KeyCode::Esc, "取消", footer = false)]
+    fn cancel(&mut self, _app: &mut App) -> Option<Page> {
+        self.input.clear();
+        Some(Page::Main)
+    }
+
+    #[key(KeyCode::Enter, "确认", footer = false)]
+    fn confirm(&mut self, app: &mut App) -> Option<Page> {
+        if self.input.is_empty() {
+            return None;
         }
+        let url = self.input.clone();
+        app.insert_sub(url);
+        self.input.clear();
+        Some(Page::Main)
+    }
+
+    #[key(KeyCode::Backspace, "删除字符", footer = false)]
+    fn backspace(&mut self, _app: &mut App) -> Option<Page> {
+        self.input.pop();
+        None
+    }
+
+    #[key(KeyCode::Char(_))]
+    fn input_char(&mut self, _app: &mut App, key: KeyEvent) -> Option<Page> {
+        if let KeyCode::Char(c) = key.code {
+            self.input.push(c);
+        }
+        None
     }
 
     pub fn draw(&mut self, _app: &mut App, f: &mut Frame) {

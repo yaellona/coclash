@@ -1,125 +1,15 @@
 //! 主窗口：节点列表 + 操作日志 + 状态信息 + 底部栏。
 use crate::app::App;
-use crate::ui::keymap::{Binding, footer_text};
+use crate::ui::keymap::footer_text;
 use crate::ui::widgets::OperationLog;
 use crate::ui::{Page, widgets};
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::window;
+use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
     widgets::TableState,
 };
-
-pub const BINDINGS: &[Binding] = &[
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('q'),
-        desc: "退出",
-        in_footer: true,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('?'),
-        desc: "帮助",
-        in_footer: true,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Tab,
-        desc: "切换面板",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Esc,
-        desc: "回到节点列表",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Up,
-        desc: "导航",
-        in_footer: true,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Down,
-        desc: "导航",
-        in_footer: true,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::PageUp,
-        desc: "翻页",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::PageDown,
-        desc: "翻页",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('s'),
-        desc: "开关mihomo",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('p'),
-        desc: "系统代理",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('T'),
-        desc: "TUN",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('c'),
-        desc: "切换代理",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('t'),
-        desc: "测速",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('r'),
-        desc: "刷新节点",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('u'),
-        desc: "添加订阅",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('l'),
-        desc: "mihomo日志",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Char('e'),
-        desc: "设置",
-        in_footer: true,
-    },
-    Binding {
-        mode: Page::Main,
-        key: KeyCode::Enter,
-        desc: "选中节点",
-        in_footer: false,
-    },
-];
 
 /// 主窗口内的可聚焦面板（类型安全，穷尽匹配）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,14 +41,17 @@ pub struct MainWindow {
     log_visible: usize,
 }
 
+#[window]
 impl MainWindow {
-    pub fn new() -> Self {
+    pub fn new(_app: &App) -> Self {
         Self {
             focus: Panel::Content,
             operation_log: OperationLog::new(),
             log_visible: 1,
         }
     }
+
+    pub fn on_open(&mut self) {}
 
     fn navigate(&mut self, app: &mut App, step: i32) {
         let len = app.state.nodes.len();
@@ -168,48 +61,122 @@ impl MainWindow {
         app.state.select = wrap(app.state.select, len, step);
     }
 
-    pub fn handle_key(&mut self, app: &mut App, key: KeyEvent) -> Option<Page> {
-        match key.code {
-            KeyCode::Char('q') => app.should_quit = true,
-            KeyCode::Char('?') => return Some(Page::Help),
-            KeyCode::Tab => self.focus = self.focus.cycle(),
-            KeyCode::Esc => self.focus = Panel::Content,
-            KeyCode::Up => match self.focus {
-                Panel::OperationLog => self.operation_log.up(),
-                Panel::Content => self.navigate(app, -1),
-            },
-            KeyCode::Down => match self.focus {
-                Panel::OperationLog => {
-                    let total = app.state.logs.len();
-                    self.operation_log.down(total);
-                }
-                Panel::Content => self.navigate(app, 1),
-            },
-            KeyCode::PageUp => {
-                if self.focus == Panel::OperationLog {
-                    self.operation_log.page_up(self.log_visible);
-                }
+    #[key(KeyCode::Char('q'), "退出", footer = true)]
+    fn quit(&mut self, app: &mut App) -> Option<Page> {
+        app.should_quit = true;
+        None
+    }
+
+    #[key(KeyCode::Char('?'), "帮助", footer = true)]
+    fn open_help(&mut self, _app: &mut App) -> Option<Page> {
+        Some(Page::Help)
+    }
+
+    #[key(KeyCode::Tab, "切换面板", footer = false)]
+    fn cycle_panel(&mut self, _app: &mut App) -> Option<Page> {
+        self.focus = self.focus.cycle();
+        None
+    }
+
+    #[key(KeyCode::Esc, "回到节点列表", footer = false)]
+    fn reset_focus(&mut self, _app: &mut App) -> Option<Page> {
+        self.focus = Panel::Content;
+        None
+    }
+
+    #[key(KeyCode::Up, "导航", footer = true)]
+    fn up(&mut self, app: &mut App) -> Option<Page> {
+        match self.focus {
+            Panel::OperationLog => self.operation_log.up(),
+            Panel::Content => self.navigate(app, -1),
+        }
+        None
+    }
+
+    #[key(KeyCode::Down, "导航", footer = true)]
+    fn down(&mut self, app: &mut App) -> Option<Page> {
+        match self.focus {
+            Panel::OperationLog => {
+                let total = app.state.logs.len();
+                self.operation_log.down(total);
             }
-            KeyCode::PageDown => {
-                if self.focus == Panel::OperationLog {
-                    let total = app.state.logs.len();
-                    self.operation_log.page_down(total, self.log_visible);
-                }
-            }
-            KeyCode::Char('s') => app.toggle_mihomo(),
-            KeyCode::Char('p') => app.toggle_system_proxy(),
-            KeyCode::Char('T') => app.toggle_tun(),
-            KeyCode::Char('c') => return Some(Page::ProviderSelect),
-            KeyCode::Char('t') => app.start_delay_test(),
-            KeyCode::Char('r') => app.load_nodes(),
-            KeyCode::Char('u') => return Some(Page::UrlInput),
-            KeyCode::Char('l') => return Some(Page::MihomoLog),
-            KeyCode::Char('e') => return Some(Page::Settings),
-            KeyCode::Enter if self.focus == Panel::Content && !app.state.nodes.is_empty() => {
-                let index = app.state.select;
-                app.switch_node(index);
-            }
-            _ => {}
+            Panel::Content => self.navigate(app, 1),
+        }
+        None
+    }
+
+    #[key(KeyCode::PageUp, "翻页", footer = false)]
+    fn page_up(&mut self, _app: &mut App) -> Option<Page> {
+        if self.focus == Panel::OperationLog {
+            self.operation_log.page_up(self.log_visible);
+        }
+        None
+    }
+
+    #[key(KeyCode::PageDown, "翻页", footer = false)]
+    fn page_down(&mut self, app: &mut App) -> Option<Page> {
+        if self.focus == Panel::OperationLog {
+            let total = app.state.logs.len();
+            self.operation_log.page_down(total, self.log_visible);
+        }
+        None
+    }
+
+    #[key(KeyCode::Char('s'), "开关mihomo", footer = false)]
+    fn toggle_mihomo(&mut self, app: &mut App) -> Option<Page> {
+        app.toggle_mihomo();
+        None
+    }
+
+    #[key(KeyCode::Char('p'), "系统代理", footer = false)]
+    fn toggle_system_proxy(&mut self, app: &mut App) -> Option<Page> {
+        app.toggle_system_proxy();
+        None
+    }
+
+    #[key(KeyCode::Char('T'), "TUN", footer = false)]
+    fn toggle_tun(&mut self, app: &mut App) -> Option<Page> {
+        app.toggle_tun();
+        None
+    }
+
+    #[key(KeyCode::Char('c'), "切换代理", footer = false)]
+    fn provider_select(&mut self, _app: &mut App) -> Option<Page> {
+        Some(Page::ProviderSelect)
+    }
+
+    #[key(KeyCode::Char('t'), "测速", footer = false)]
+    fn delay_test(&mut self, app: &mut App) -> Option<Page> {
+        app.start_delay_test();
+        None
+    }
+
+    #[key(KeyCode::Char('r'), "刷新节点", footer = false)]
+    fn refresh_nodes(&mut self, app: &mut App) -> Option<Page> {
+        app.load_nodes();
+        None
+    }
+
+    #[key(KeyCode::Char('u'), "添加订阅", footer = false)]
+    fn add_subscription(&mut self, _app: &mut App) -> Option<Page> {
+        Some(Page::UrlInput)
+    }
+
+    #[key(KeyCode::Char('l'), "mihomo日志", footer = false)]
+    fn open_log(&mut self, _app: &mut App) -> Option<Page> {
+        Some(Page::MihomoLog)
+    }
+
+    #[key(KeyCode::Char('e'), "设置", footer = true)]
+    fn open_settings(&mut self, _app: &mut App) -> Option<Page> {
+        Some(Page::Settings)
+    }
+
+    #[key(KeyCode::Enter, "选中节点", footer = false)]
+    fn select_node(&mut self, app: &mut App) -> Option<Page> {
+        if self.focus == Panel::Content && !app.state.nodes.is_empty() {
+            let index = app.state.select;
+            app.switch_node(index);
         }
         None
     }

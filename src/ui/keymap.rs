@@ -1,7 +1,17 @@
-//! 按键注册表与帮助/底部栏生成（纯元数据，分发在各窗口 handle_key 内）。
-use crate::ui::{Page, windows};
+//! 按键注册表与帮助/底部栏生成（纯元数据；分发由 `#[window]` 生成的 `handle_key` 完成）。
+use crate::ui::Page;
 use crossterm::event::KeyCode;
-use std::sync::LazyLock;
+
+/// 聚合后的全局按键表，由 `crate::windows!` 注册表宏在 `ui/windows/mod.rs` 生成。
+pub use super::windows::BINDINGS;
+
+/// 窗口内按键定义（由 `#[key]` 收集）：不携带所属页，`mode` 由注册表宏填充。
+#[derive(Clone, Copy)]
+pub struct KeyDef {
+    pub key: KeyCode,
+    pub desc: Option<&'static str>,
+    pub in_footer: bool,
+}
 
 /// 一条按键绑定：所属窗口 + 按键 + 帮助文案。
 #[derive(Clone, Copy)]
@@ -11,18 +21,6 @@ pub struct Binding {
     pub desc: &'static str,
     pub in_footer: bool,
 }
-
-/// 聚合各窗口的按键表，帮助弹窗和底部栏据此自动生成。
-pub static BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
-    let mut bindings = Vec::new();
-    bindings.extend(windows::main::BINDINGS.iter().copied());
-    bindings.extend(windows::url_input::BINDINGS.iter().copied());
-    bindings.extend(windows::provider_select::BINDINGS.iter().copied());
-    bindings.extend(windows::help::BINDINGS.iter().copied());
-    bindings.extend(windows::mihomo_log::BINDINGS.iter().copied());
-    bindings.extend(windows::settings::BINDINGS.iter().copied());
-    bindings
-});
 
 /// 按键对应的可读标签
 pub fn key_label(key: KeyCode) -> String {

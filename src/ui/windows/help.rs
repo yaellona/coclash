@@ -1,10 +1,11 @@
 //! 帮助窗口：统一 Scroller + Paragraph 渲染。
 use crate::app::App;
 use crate::ui::Page;
-use crate::ui::keymap::{Binding, help_rows};
+use crate::ui::keymap::help_rows;
 use crate::ui::layout::popup_rect;
 use crate::ui::scroll::Scroller;
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::window;
+use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     style::{Color, Style},
@@ -12,47 +13,15 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-pub const BINDINGS: &[Binding] = &[
-    Binding {
-        mode: Page::Help,
-        key: KeyCode::Esc,
-        desc: "关闭",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Help,
-        key: KeyCode::Up,
-        desc: "导航",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Help,
-        key: KeyCode::Down,
-        desc: "导航",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Help,
-        key: KeyCode::PageUp,
-        desc: "翻页",
-        in_footer: false,
-    },
-    Binding {
-        mode: Page::Help,
-        key: KeyCode::PageDown,
-        desc: "翻页",
-        in_footer: false,
-    },
-];
-
 pub struct HelpWindow {
     scroller: Scroller,
     /// 上次绘制的可见行数（翻页用）
     visible: usize,
 }
 
+#[window(popup over Main)]
 impl HelpWindow {
-    pub fn new() -> Self {
+    pub fn new(_app: &App) -> Self {
         Self {
             scroller: Scroller::new(),
             visible: 1,
@@ -65,28 +34,35 @@ impl HelpWindow {
         self.scroller.follow = false;
     }
 
-    pub fn handle_key(&mut self, _app: &mut App, key: KeyEvent) -> Option<Page> {
+    #[key(KeyCode::Esc, "关闭", footer = false)]
+    fn close(&mut self, _app: &mut App) -> Option<Page> {
+        Some(Page::Main)
+    }
+
+    #[key(KeyCode::Up, "导航", footer = false)]
+    fn up(&mut self, _app: &mut App) -> Option<Page> {
+        self.scroller.up();
+        None
+    }
+
+    #[key(KeyCode::Down, "导航", footer = false)]
+    fn down(&mut self, _app: &mut App) -> Option<Page> {
         let total = help_rows(Page::Main).len();
-        match key.code {
-            KeyCode::Esc => Some(Page::Main),
-            KeyCode::Up => {
-                self.scroller.up();
-                None
-            }
-            KeyCode::Down => {
-                self.scroller.down(total);
-                None
-            }
-            KeyCode::PageUp => {
-                self.scroller.page_up(self.visible);
-                None
-            }
-            KeyCode::PageDown => {
-                self.scroller.page_down(total, self.visible);
-                None
-            }
-            _ => None,
-        }
+        self.scroller.down(total);
+        None
+    }
+
+    #[key(KeyCode::PageUp, "翻页", footer = false)]
+    fn page_up(&mut self, _app: &mut App) -> Option<Page> {
+        self.scroller.page_up(self.visible);
+        None
+    }
+
+    #[key(KeyCode::PageDown, "翻页", footer = false)]
+    fn page_down(&mut self, _app: &mut App) -> Option<Page> {
+        let total = help_rows(Page::Main).len();
+        self.scroller.page_down(total, self.visible);
+        None
     }
 
     pub fn draw(&mut self, _app: &mut App, f: &mut Frame) {
