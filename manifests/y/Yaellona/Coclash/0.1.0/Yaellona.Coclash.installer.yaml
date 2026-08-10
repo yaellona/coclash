@@ -15,6 +15,6 @@ Dependencies:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/yaellona/mihomo-tui/releases/download/v0.1.0/coclash-windows-x64.zip
-    InstallerSha256: 77A0C0C68293E01D2A47B3A4AA95DD98CF353101ABCF2418CBE7FF230FB3D58B
+    InstallerSha256: BCCD604CA017AC6997F3378985192DB77BB1F94F7CE335FC7328D2789741B711
 ManifestType: installer
 ManifestVersion: 1.12.0

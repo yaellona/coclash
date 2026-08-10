@@ -140,10 +140,14 @@ fn is_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path, pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        let _ = config_dir;
-        windows_image_name(pid)
-            .map(|img| img.eq_ignore_ascii_case(&mihomo_image_name(&binary.cmd)))
-            .unwrap_or(false)
+        if let Some((name, cmdline)) = windows_process_info(pid) {
+            matches_mihomo_info(&name, &cmdline, binary, config_dir)
+        } else {
+            // CIM 查询失败时退回镜像名比对
+            windows_image_name(pid)
+                .map(|img| img.eq_ignore_ascii_case(&mihomo_image_name(&binary.cmd)))
+                .unwrap_or(false)
+        }
     }
     #[cfg(unix)]
     {
@@ -155,6 +159,47 @@ fn is_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path, pid: u32) -> bool {
             })
             .unwrap_or(false)
     }
+}
+
+/// 判断依据：命令行包含 config_dir 为主（与 unix 语义一致，不依赖解析到的 mihomo 文件名，
+/// 避免不同解析结果互相误判为外部并清掉 pidfile）；镜像名比对为辅助兜底。
+#[cfg(windows)]
+fn matches_mihomo_info(
+    name: &str,
+    cmdline: &str,
+    binary: &ResolvedBinary,
+    config_dir: &Path,
+) -> bool {
+    match config_dir.to_str() {
+        Some(dir) if !dir.is_empty() && cmdline.contains(dir) => true,
+        _ => name.eq_ignore_ascii_case(&mihomo_image_name(&binary.cmd)),
+    }
+}
+
+/// 一次调用同时取进程镜像名与命令行（PowerShell 5.1 CIM）
+#[cfg(windows)]
+fn windows_process_info(pid: u32) -> Option<(String, String)> {
+    let script = format!(
+        "Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' | Select-Object -Property Name,CommandLine | ConvertTo-Json -Compress"
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let name = value.get("Name")?.as_str()?.to_string();
+    let cmdline = value
+        .get("CommandLine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((name, cmdline))
 }
 
 #[cfg(windows)]
@@ -496,4 +541,61 @@ fn mihomo_image_name(mihomo_path: &str) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| mihomo_path.to_string())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::core::mihomo::binary::{BinarySource, ResolvedBinary};
+
+    fn binary(cmd: &str) -> ResolvedBinary {
+        ResolvedBinary {
+            cmd: cmd.to_string(),
+            source: BinarySource::Path,
+        }
+    }
+
+    #[test]
+    fn cmdline_match_wins_over_image_name() {
+        // 回归：旧版/裸名解析出 "mihomo.exe"，但实际进程是 winget 包名，
+        // 只要命令行包含 config_dir 就应判定为本程序启动
+        let config_dir = Path::new(r"C:\Users\rimyn\AppData\Roaming\coclash");
+        assert!(matches_mihomo_info(
+            "mihomo-windows-amd64.exe",
+            r#""C:\...\mihomo-windows-amd64.exe" -d C:\Users\rimyn\AppData\Roaming\coclash"#,
+            &binary("mihomo.exe"),
+            config_dir,
+        ));
+    }
+
+    #[test]
+    fn image_name_fallback() {
+        let config_dir = Path::new(r"C:\Users\rimyn\AppData\Roaming\coclash");
+        // 命令行不含 config_dir 且镜像名不匹配 → false
+        assert!(!matches_mihomo_info(
+            "other.exe",
+            r"C:\other\other.exe -d C:\somewhere\else",
+            &binary("mihomo.exe"),
+            config_dir,
+        ));
+        // 镜像名匹配（忽略大小写）→ true
+        assert!(matches_mihomo_info(
+            "MIHOMO.EXE",
+            "",
+            &binary(r"C:\opt\mihomo.exe"),
+            config_dir,
+        ));
+    }
+
+    #[test]
+    fn empty_config_dir_does_not_match_everything() {
+        // 空 config_dir 时不能仅凭 contains("") 命中 cmdline 检查
+        let config_dir = Path::new("");
+        assert!(!matches_mihomo_info(
+            "other.exe",
+            "",
+            &binary("mihomo.exe"),
+            config_dir,
+        ));
+    }
 }
