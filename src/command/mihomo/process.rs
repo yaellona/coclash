@@ -140,6 +140,7 @@ fn is_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path, pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
+        let _ = config_dir;
         windows_image_name(pid)
             .map(|img| img.eq_ignore_ascii_case(&mihomo_image_name(&binary.cmd)))
             .unwrap_or(false)
