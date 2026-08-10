@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: Yaellona.Coclash
+PackageVersion: 0.1.0
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: coclash.exe
+Commands:
+  - coclash
+Dependencies:
+  PackageDependencies:
+    - PackageIdentifier: MetaCubeX.Mihomo
+      MinimumVersion: 1.18.0
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/yaellona/mihomo-tui/releases/download/v0.1.0/coclash-windows-x64.zip
+    InstallerSha256: 77A0C0C68293E01D2A47B3A4AA95DD98CF353101ABCF2418CBE7FF230FB3D58B
+ManifestType: installer
+ManifestVersion: 1.12.0

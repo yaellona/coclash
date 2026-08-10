@@ -74,7 +74,64 @@ pub fn resolve_mihomo_exe(settings: &Settings) -> ResolvedBinary {
     let env_file = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.join(".env")));
-    resolve_mihomo_exe_with(settings, env_val, env_file.as_deref(), nix_wrapper_path())
+    let mut resolved =
+        resolve_mihomo_exe_with(settings, env_val, env_file.as_deref(), nix_wrapper_path());
+    if resolved.source == BinarySource::Path {
+        upgrade_path_fallback(&mut resolved);
+    }
+    resolved
+}
+
+/// PATH 兜底命中后升级为完整路径；若默认名不存在则尝试 winget 的
+/// MetaCubeX.Mihomo 包实际提供的 `mihomo-windows-{arch}.exe`。
+#[cfg(windows)]
+fn upgrade_path_fallback(resolved: &mut ResolvedBinary) {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        if let Some(found) = find_on_path(&path_var, &resolved.cmd) {
+            resolved.cmd = found;
+            return;
+        }
+        for candidate in mihomo_windows_candidates() {
+            if let Some(found) = find_on_path(&path_var, &candidate) {
+                resolved.cmd = found;
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn upgrade_path_fallback(_resolved: &mut ResolvedBinary) {}
+
+/// 按 PATH 逐目录查找可执行文件，命中返回完整路径
+#[cfg(windows)]
+pub(crate) fn find_on_path(path_var: &std::ffi::OsStr, name: &str) -> Option<String> {
+    for dir in std::env::split_paths(path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// winget MetaCubeX.Mihomo 包解压后的可执行文件名（优先当前架构）
+#[cfg(windows)]
+pub(crate) fn mihomo_windows_candidates() -> Vec<String> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        other => other,
+    };
+    let mut names = vec![format!("mihomo-windows-{arch}.exe")];
+    for a in ["amd64", "arm64", "386"] {
+        let n = format!("mihomo-windows-{a}.exe");
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names
 }
 
 /// 解析链主体；`wrapper` 由调用方探测传入，便于测试隔离宿主环境。

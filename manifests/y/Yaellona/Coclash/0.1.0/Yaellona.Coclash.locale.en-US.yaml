@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: Yaellona.Coclash
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: yaellona
+PackageName: coclash
+PackageUrl: https://github.com/yaellona/mihomo-tui
+License: MIT
+LicenseUrl: https://github.com/yaellona/mihomo-tui/blob/main/LICENSE
+ShortDescription: A terminal UI for the mihomo proxy core with system proxy and TUN support
+Moniker: coclash
+Tags:
+  - clash
+  - mihomo
+  - proxy
+  - tui
+  - tun
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

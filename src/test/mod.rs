@@ -240,3 +240,34 @@ fn test_resolve_fallback_to_path() {
     assert_eq!(r2.cmd, "my-mihomo");
     assert_eq!(r2.source, mihomo::BinarySource::Path);
 }
+
+#[cfg(windows)]
+#[test]
+fn test_find_on_path_windows() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let exe = dir.path().join("mihomo-windows-amd64.exe");
+    std::fs::write(&exe, b"x").unwrap();
+    let path = std::env::join_paths([dir.path()]).unwrap();
+    assert_eq!(
+        mihomo::binary::find_on_path(&path, "mihomo-windows-amd64.exe"),
+        Some(exe.to_string_lossy().into_owned())
+    );
+    assert_eq!(mihomo::binary::find_on_path(&path, "missing.exe"), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn test_mihomo_windows_candidates_prefers_current_arch() {
+    let names = mihomo::binary::mihomo_windows_candidates();
+    let expected_arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        other => other,
+    };
+    assert_eq!(names[0], format!("mihomo-windows-{expected_arch}.exe"));
+    assert!(names.len() >= 3);
+    for a in ["amd64", "arm64", "386"] {
+        assert!(names.iter().any(|n| n.ends_with(&format!("{a}.exe"))));
+    }
+}

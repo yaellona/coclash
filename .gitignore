@@ -1,3 +1,4 @@
 /target
 *.ps1
 /result
+*.zip
