@@ -27,6 +27,9 @@ impl OperationLogs {
     pub fn len(&self) -> usize {
         self.logs.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.logs.is_empty()
+    }
     pub fn add_log(&mut self, log_type: LogType, msg: String) {
         self.logs.push(OperationLog::new(log_type, msg));
         if self.logs.len() > MAX_LOGS {
@@ -36,6 +39,12 @@ impl OperationLogs {
     }
     pub fn iter(&self) -> impl Iterator<Item = &OperationLog> {
         self.logs.iter()
+    }
+}
+
+impl Default for OperationLogs {
+    fn default() -> Self {
+        Self::new()
     }
 }
 #[derive(Debug, Clone)]

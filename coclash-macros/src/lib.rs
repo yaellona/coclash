@@ -140,16 +140,16 @@ struct KeyEntry {
 }
 
 /// 在 impl 上标注：声明窗口属性、校验契约、收集 `#[key]` 方法，
-/// 生成 `KEYS` 常量与 `impl crate::ui::window::Window`。
+/// 生成 `KEYS` 常量与 `impl crate::tui::window::Window`。
 ///
 /// 窗口固有方法约定（在 `#[window]` impl 内书写）：
-/// - `pub fn new(app: &App) -> Self`
+/// - `pub fn new(manager: &Manager) -> Self`
 /// - `pub fn on_open(&mut self)`
-/// - `pub fn draw(&mut self, app: &mut App, f: &mut Frame)`
+/// - `pub fn draw(&mut self, manager: &mut Manager, f: &mut Frame)`
 ///
 /// 按键处理器签名约定：
-/// - 普通按键：`fn(&mut self, app: &mut App) -> Option<Page>`
-/// - 通配符按键（如 `#[key(KeyCode::Char(_))]`，需要原始按键）：`fn(&mut self, app: &mut App, key: KeyEvent) -> Option<Page>`
+/// - 普通按键：`fn(&mut self, manager: &mut Manager) -> Option<Page>`
+/// - 通配符按键（如 `#[key(KeyCode::Char(_))]`，需要原始按键）：`fn(&mut self, manager: &mut Manager, key: KeyEvent) -> Option<Page>`
 #[proc_macro_attribute]
 pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
     let original = parse_macro_input!(item as ItemImpl);
@@ -213,7 +213,7 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
     if draw.is_none() {
         errors.push(Error::new(
             imp.span(),
-            "#[window] 窗口缺少 `pub fn draw(&mut self, app: &mut App, f: &mut Frame)`",
+            "#[window] 窗口缺少 `pub fn draw(&mut self, manager: &mut Manager, f: &mut Frame)`",
         ));
     }
 
@@ -255,9 +255,9 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
         let expected = if wildcard { 3 } else { 2 };
         if sig.inputs.len() != expected {
             let hint = if wildcard {
-                "签名：`fn(&mut self, app: &mut App, key: KeyEvent) -> Option<Page>`"
+                "签名：`fn(&mut self, manager: &mut Manager, key: KeyEvent) -> Option<Page>`"
             } else {
-                "签名：`fn(&mut self, app: &mut App) -> Option<Page>`"
+                "签名：`fn(&mut self, manager: &mut Manager) -> Option<Page>`"
             };
             errors.push(Error::new(
                 sig.span(),
@@ -307,7 +307,7 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
             let desc = e.desc.as_ref().unwrap();
             let footer = e.footer;
             quote! {
-                crate::ui::keymap::KeyDef { key: #spec, desc: Some(#desc), in_footer: #footer }
+                crate::tui::keymap::KeyDef { key: #spec, desc: Some(#desc), in_footer: #footer }
             }
         });
     let arms = entries.iter().map(|e| {
@@ -321,7 +321,7 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
     });
     let generated_tokens = quote! {
         /// 按键元数据（由 #[window] 生成），帮助/底部栏的数据源。
-        pub const KEYS: &[crate::ui::keymap::KeyDef] = &[
+        pub const KEYS: &[crate::tui::keymap::KeyDef] = &[
             #(#key_defs,)*
         ];
     };
@@ -340,7 +340,7 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let self_ty = &imp.self_ty;
     let parent_expr = match &window_attr.parent {
-        Some(p) => quote! { Some(crate::ui::Page::#p) },
+        Some(p) => quote! { Some(crate::tui::Page::#p) },
         None => quote! { None },
     };
     // 移入 trait impl 前，抹掉 visibility / async / unsafe 等修饰（trait 方法不允许）
@@ -358,9 +358,9 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
     let on_open = on_open.map(to_trait_method);
     let draw = draw.map(to_trait_method);
     let trait_impl = quote! {
-        impl crate::ui::window::Window for #self_ty {
-            fn meta(&self) -> crate::ui::window::WindowMeta {
-                crate::ui::window::WindowMeta { parent: #parent_expr }
+        impl crate::tui::window::Window for #self_ty {
+            fn meta(&self) -> crate::tui::window::WindowMeta {
+                crate::tui::window::WindowMeta { parent: #parent_expr }
             }
 
             #on_open
@@ -370,9 +370,9 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
             /// 按键分发（由 #[window] 生成）：声明顺序即匹配优先级，通配符请放在最后。
             fn handle_key(
                 &mut self,
-                app: &mut crate::app::App,
+                app: &mut crate::manager::Manager,
                 key: crossterm::event::KeyEvent,
-            ) -> Option<crate::ui::Page> {
+            ) -> Option<crate::tui::Page> {
                 match key.code {
                     #(#arms,)*
                     _ => None,
@@ -509,7 +509,7 @@ pub fn windows(input: TokenStream) -> TokenStream {
         let page = &e.page;
         quote! {
             bindings.extend(#ty::KEYS.iter().filter_map(|k| {
-                k.desc.map(|desc| crate::ui::keymap::Binding {
+                k.desc.map(|desc| crate::tui::keymap::Binding {
                     mode: Page::#page,
                     key: k.key,
                     desc,
@@ -520,7 +520,7 @@ pub fn windows(input: TokenStream) -> TokenStream {
     });
 
     quote! {
-        use crate::ui::window::Window;
+        use crate::tui::window::Window;
 
         /// 窗口页面身份（由 windows! 注册表生成）
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -537,7 +537,7 @@ pub fn windows(input: TokenStream) -> TokenStream {
         }
 
         impl Windows {
-            pub fn new(app: &crate::app::App) -> Self {
+            pub fn new(app: &crate::manager::Manager) -> Self {
                 Self {
                     current: Page::#first,
                     #(#inits,)*
@@ -556,7 +556,7 @@ pub fn windows(input: TokenStream) -> TokenStream {
             }
 
             /// 按键分发：窗口返回 `Some(page)` 表示请求导航
-            pub fn handle_key(&mut self, app: &mut crate::app::App, key: crossterm::event::KeyEvent) {
+            pub fn handle_key(&mut self, app: &mut crate::manager::Manager, key: crossterm::event::KeyEvent) {
                 let nav = match self.current {
                     #(#handle_arms,)*
                 };
@@ -566,20 +566,20 @@ pub fn windows(input: TokenStream) -> TokenStream {
             }
 
             /// 绘制某页：若该页是弹窗（`Window::meta` 声明了父页面），先递归画父页面再叠加自己
-            fn draw_page(&mut self, page: Page, app: &mut crate::app::App, f: &mut ratatui::Frame) {
+            fn draw_page(&mut self, page: Page, app: &mut crate::manager::Manager, f: &mut ratatui::Frame) {
                 match page {
                     #(#draw_arms,)*
                 }
             }
 
             /// 绘制当前页
-            pub fn draw(&mut self, app: &mut crate::app::App, f: &mut ratatui::Frame) {
+            pub fn draw(&mut self, app: &mut crate::manager::Manager, f: &mut ratatui::Frame) {
                 self.draw_page(self.current, app, f);
             }
         }
 
         /// 全部窗口按键聚合（由 windows! 注册表生成），帮助弹窗和底部栏据此自动生成。
-        pub static BINDINGS: std::sync::LazyLock<Vec<crate::ui::keymap::Binding>> =
+        pub static BINDINGS: std::sync::LazyLock<Vec<crate::tui::keymap::Binding>> =
             std::sync::LazyLock::new(|| {
                 let mut bindings = Vec::new();
                 #(#binding_ext)*

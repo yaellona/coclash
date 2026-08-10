@@ -1,5 +1,5 @@
 //! 按键注册表与帮助/底部栏生成（纯元数据；分发由 `#[window]` 生成的 `handle_key` 完成）。
-use crate::ui::Page;
+use crate::tui::Page;
 use crossterm::event::KeyCode;
 
 /// 聚合后的全局按键表，由 `crate::windows!` 注册表宏在 `ui/windows/mod.rs` 生成。

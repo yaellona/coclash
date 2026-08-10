@@ -1,9 +1,9 @@
 //! 帮助窗口：统一 Scroller + Paragraph 渲染。
-use crate::app::App;
-use crate::ui::Page;
-use crate::ui::keymap::help_rows;
-use crate::ui::layout::popup_rect;
-use crate::ui::scroll::Scroller;
+use crate::manager::Manager;
+use crate::tui::Page;
+use crate::tui::keymap::help_rows;
+use crate::tui::layout::popup_rect;
+use crate::tui::scroll::Scroller;
 use crate::window;
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -21,7 +21,7 @@ pub struct HelpWindow {
 
 #[window(popup over Main)]
 impl HelpWindow {
-    pub fn new(_app: &App) -> Self {
+    pub fn new(_manager: &Manager) -> Self {
         Self {
             scroller: Scroller::new(),
             visible: 1,
@@ -35,37 +35,37 @@ impl HelpWindow {
     }
 
     #[key(KeyCode::Esc, "关闭", footer = false)]
-    fn close(&mut self, _app: &mut App) -> Option<Page> {
+    fn close(&mut self, _manager: &mut Manager) -> Option<Page> {
         Some(Page::Main)
     }
 
     #[key(KeyCode::Up, "导航", footer = false)]
-    fn up(&mut self, _app: &mut App) -> Option<Page> {
+    fn up(&mut self, _manager: &mut Manager) -> Option<Page> {
         self.scroller.up();
         None
     }
 
     #[key(KeyCode::Down, "导航", footer = false)]
-    fn down(&mut self, _app: &mut App) -> Option<Page> {
+    fn down(&mut self, _manager: &mut Manager) -> Option<Page> {
         let total = help_rows(Page::Main).len();
         self.scroller.down(total);
         None
     }
 
     #[key(KeyCode::PageUp, "翻页", footer = false)]
-    fn page_up(&mut self, _app: &mut App) -> Option<Page> {
+    fn page_up(&mut self, _manager: &mut Manager) -> Option<Page> {
         self.scroller.page_up(self.visible);
         None
     }
 
     #[key(KeyCode::PageDown, "翻页", footer = false)]
-    fn page_down(&mut self, _app: &mut App) -> Option<Page> {
+    fn page_down(&mut self, _manager: &mut Manager) -> Option<Page> {
         let total = help_rows(Page::Main).len();
         self.scroller.page_down(total, self.visible);
         None
     }
 
-    pub fn draw(&mut self, _app: &mut App, f: &mut Frame) {
+    pub fn draw(&mut self, _manager: &mut Manager, f: &mut Frame) {
         let area = popup_rect(f.area());
         f.render_widget(Clear, area);
 

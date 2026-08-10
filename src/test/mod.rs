@@ -1,5 +1,5 @@
-use crate::command::mihomo;
-use crate::config::mihomo_config::MihomoConfig;
+use crate::core::mihomo;
+use crate::core::config::mihomo_config::MihomoConfig;
 use crate::settings::Settings;
 use std::io::Write;
 
@@ -141,7 +141,7 @@ fn test_mihomo_log_tail() {
         writeln!(f, "line {i}").unwrap();
     }
     drop(f);
-    let lines = crate::ui::windows::mihomo_log::read_tail(&path, 128 * 1024, 10);
+    let lines = crate::tui::windows::mihomo_log::read_tail(&path, 128 * 1024, 10);
     assert_eq!(lines.len(), 10);
     assert_eq!(lines[0], "line 90");
     assert_eq!(lines[9], "line 99");

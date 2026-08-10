@@ -1,7 +1,7 @@
 //! 添加订阅窗口：输入框状态。
-use crate::app::App;
-use crate::ui::Page;
-use crate::ui::layout::popup_rect;
+use crate::manager::Manager;
+use crate::tui::Page;
+use crate::tui::layout::popup_rect;
 use crate::window;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -17,7 +17,7 @@ pub struct UrlInputWindow {
 
 #[window(popup over Main)]
 impl UrlInputWindow {
-    pub fn new(_app: &App) -> Self {
+    pub fn new(_manager: &Manager) -> Self {
         Self {
             input: String::new(),
         }
@@ -26,37 +26,37 @@ impl UrlInputWindow {
     pub fn on_open(&mut self) {}
 
     #[key(KeyCode::Esc, "取消", footer = false)]
-    fn cancel(&mut self, _app: &mut App) -> Option<Page> {
+    fn cancel(&mut self, _manager: &mut Manager) -> Option<Page> {
         self.input.clear();
         Some(Page::Main)
     }
 
     #[key(KeyCode::Enter, "确认", footer = false)]
-    fn confirm(&mut self, app: &mut App) -> Option<Page> {
+    fn confirm(&mut self, manager: &mut Manager) -> Option<Page> {
         if self.input.is_empty() {
             return None;
         }
         let url = self.input.clone();
-        app.insert_sub(url);
+        manager.insert_sub(url);
         self.input.clear();
         Some(Page::Main)
     }
 
     #[key(KeyCode::Backspace, "删除字符", footer = false)]
-    fn backspace(&mut self, _app: &mut App) -> Option<Page> {
+    fn backspace(&mut self, _manager: &mut Manager) -> Option<Page> {
         self.input.pop();
         None
     }
 
     #[key(KeyCode::Char(_))]
-    fn input_char(&mut self, _app: &mut App, key: KeyEvent) -> Option<Page> {
+    fn input_char(&mut self, _manager: &mut Manager, key: KeyEvent) -> Option<Page> {
         if let KeyCode::Char(c) = key.code {
             self.input.push(c);
         }
         None
     }
 
-    pub fn draw(&mut self, _app: &mut App, f: &mut Frame) {
+    pub fn draw(&mut self, _manager: &mut Manager, f: &mut Frame) {
         let area = popup_rect(f.area());
 
         f.render_widget(Clear, area);

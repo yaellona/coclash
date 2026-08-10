@@ -2,8 +2,8 @@
 //!
 //! 用户窗口以固有方法书写 `new`/`on_open`/`draw` + `#[key]` 处理器，
 //! `#[window]` 宏负责生成 `impl Window`（校验契约、生成 `handle_key` 与 `meta`）。
-use crate::app::App;
-use crate::ui::Page;
+use crate::manager::Manager;
+use crate::tui::Page;
 use crossterm::event::KeyEvent;
 use ratatui::Frame;
 
@@ -23,8 +23,8 @@ pub trait Window {
     fn on_open(&mut self);
 
     /// 绘制（弹窗由注册表先画父页面再叠加）
-    fn draw(&mut self, app: &mut App, f: &mut Frame);
+    fn draw(&mut self, manager: &mut Manager, f: &mut Frame);
 
     /// 按键分发：返回 `Some(page)` 表示请求导航；由 `#[window]` 宏生成
-    fn handle_key(&mut self, app: &mut App, key: KeyEvent) -> Option<Page>;
+    fn handle_key(&mut self, manager: &mut Manager, key: KeyEvent) -> Option<Page>;
 }

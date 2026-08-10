@@ -1,7 +1,7 @@
 //! 操作日志组件：统一 Scroller + Paragraph 渲染（按显示宽度折行）。
 use crate::operation_log::{LogType, OperationLogs};
-use crate::ui::layout::wrap_lines;
-use crate::ui::scroll::Scroller;
+use crate::tui::layout::wrap_lines;
+use crate::tui::scroll::Scroller;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},

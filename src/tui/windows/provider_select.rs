@@ -1,8 +1,8 @@
 //! 选择代理商窗口。
-use crate::app::App;
-use crate::config::mihomo_config::MihomoConfig;
-use crate::ui::Page;
-use crate::ui::layout::popup_rect;
+use crate::core::config::mihomo_config::MihomoConfig;
+use crate::manager::Manager;
+use crate::tui::Page;
+use crate::tui::layout::popup_rect;
 use crate::window;
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -17,16 +17,17 @@ pub struct ProviderSelectWindow {
 
 #[window(popup over Main)]
 impl ProviderSelectWindow {
-    pub fn new(app: &App) -> Self {
+    pub fn new(manager: &Manager) -> Self {
         Self {
-            select: initial_select(&app.state.config),
+            select: initial_select(&manager.state.config),
         }
     }
 
     pub fn on_open(&mut self) {}
 
-    fn provider_count(&self, app: &App) -> usize {
-        app.state
+    fn provider_count(&self, manager: &Manager) -> usize {
+        manager
+            .state
             .config
             .proxy_providers
             .as_ref()
@@ -34,60 +35,60 @@ impl ProviderSelectWindow {
             .unwrap_or(0)
     }
 
-    fn navigate(&mut self, app: &App, step: i32) {
-        let len = self.provider_count(app);
+    fn navigate(&mut self, manager: &Manager, step: i32) {
+        let len = self.provider_count(manager);
         if len == 0 {
             return;
         }
         self.select = (self.select as i32 + step).rem_euclid(len as i32) as usize;
     }
 
-    fn delete_current(&mut self, app: &mut App) {
-        let name = match app.state.config.provider_key_by_index(self.select) {
+    fn delete_current(&mut self, manager: &mut Manager) {
+        let name = match manager.state.config.provider_key_by_index(self.select) {
             Some(n) => n,
             None => return,
         };
-        if let Some(providers) = app.state.config.proxy_providers.as_mut() {
+        if let Some(providers) = manager.state.config.proxy_providers.as_mut() {
             providers.shift_remove(&name);
         }
-        match app.state.config.write_to_path(&app.config_path) {
-            Ok(()) => app.reload_config(),
-            Err(e) => app.log_err(e),
+        match manager.state.config.write_to_path(&manager.config_path) {
+            Ok(()) => manager.reload_config(),
+            Err(e) => manager.log_err(e),
         }
     }
 
     #[key(KeyCode::Esc, "取消", footer = false)]
-    fn cancel(&mut self, _app: &mut App) -> Option<Page> {
+    fn cancel(&mut self, _manager: &mut Manager) -> Option<Page> {
         Some(Page::Main)
     }
 
     #[key(KeyCode::Up, "导航", footer = false)]
-    fn up(&mut self, app: &mut App) -> Option<Page> {
-        self.navigate(app, -1);
+    fn up(&mut self, manager: &mut Manager) -> Option<Page> {
+        self.navigate(manager, -1);
         None
     }
 
     #[key(KeyCode::Down, "导航", footer = false)]
-    fn down(&mut self, app: &mut App) -> Option<Page> {
-        self.navigate(app, 1);
+    fn down(&mut self, manager: &mut Manager) -> Option<Page> {
+        self.navigate(manager, 1);
         None
     }
 
     #[key(KeyCode::Char('d'), "删除代理", footer = false)]
-    fn remove_provider(&mut self, app: &mut App) -> Option<Page> {
-        self.delete_current(app);
+    fn remove_provider(&mut self, manager: &mut Manager) -> Option<Page> {
+        self.delete_current(manager);
         None
     }
 
     #[key(KeyCode::Enter, "确认", footer = false)]
-    fn confirm(&mut self, app: &mut App) -> Option<Page> {
-        if let Some(name) = app.state.config.provider_key_by_index(self.select) {
-            app.switch_provider(name);
+    fn confirm(&mut self, manager: &mut Manager) -> Option<Page> {
+        if let Some(name) = manager.state.config.provider_key_by_index(self.select) {
+            manager.switch_provider(name);
         }
         Some(Page::Main)
     }
 
-    pub fn draw(&mut self, app: &mut App, f: &mut Frame) {
+    pub fn draw(&mut self, manager: &mut Manager, f: &mut Frame) {
         let area = popup_rect(f.area());
 
         // 清除背景
@@ -103,7 +104,7 @@ impl ProviderSelectWindow {
         f.render_widget(block, area);
 
         // 构建代理商列表
-        let items: Vec<String> = app
+        let items: Vec<String> = manager
             .state
             .config
             .proxy_providers

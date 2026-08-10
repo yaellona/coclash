@@ -1,9 +1,9 @@
 //! mihomo 进程日志窗口：tail 读取 + 统一 Scroller 滚动，长行自动换行。
-use crate::app::App;
+use crate::manager::Manager;
 use crate::constants::MIHOMO_LOG_FILE;
-use crate::ui::Page;
-use crate::ui::layout::wrap_lines;
-use crate::ui::scroll::Scroller;
+use crate::tui::Page;
+use crate::tui::layout::wrap_lines;
+use crate::tui::scroll::Scroller;
 use crate::window;
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -31,9 +31,9 @@ pub struct MihomoLogWindow {
 
 #[window]
 impl MihomoLogWindow {
-    pub fn new(app: &App) -> Self {
+    pub fn new(manager: &Manager) -> Self {
         Self {
-            path: app.config_dir().join(MIHOMO_LOG_FILE),
+            path: manager.config_dir().join(MIHOMO_LOG_FILE),
             lines: vec![],
             rows: vec![],
             scroller: Scroller::new(),
@@ -55,37 +55,37 @@ impl MihomoLogWindow {
     }
 
     #[key(KeyCode::Esc, "关闭", footer = false)]
-    fn close(&mut self, _app: &mut App) -> Option<Page> {
+    fn close(&mut self, _manager: &mut Manager) -> Option<Page> {
         Some(Page::Main)
     }
 
     #[key(KeyCode::Up, "导航", footer = false)]
-    fn up(&mut self, _app: &mut App) -> Option<Page> {
+    fn up(&mut self, _manager: &mut Manager) -> Option<Page> {
         self.scroller.up();
         None
     }
 
     #[key(KeyCode::Down, "导航", footer = false)]
-    fn down(&mut self, _app: &mut App) -> Option<Page> {
+    fn down(&mut self, _manager: &mut Manager) -> Option<Page> {
         let total = self.rows.len();
         self.scroller.down(total);
         None
     }
 
     #[key(KeyCode::PageUp, "翻页", footer = false)]
-    fn page_up(&mut self, _app: &mut App) -> Option<Page> {
+    fn page_up(&mut self, _manager: &mut Manager) -> Option<Page> {
         self.scroller.page_up(self.visible);
         None
     }
 
     #[key(KeyCode::PageDown, "翻页", footer = false)]
-    fn page_down(&mut self, _app: &mut App) -> Option<Page> {
+    fn page_down(&mut self, _manager: &mut Manager) -> Option<Page> {
         let total = self.rows.len();
         self.scroller.page_down(total, self.visible);
         None
     }
 
-    pub fn draw(&mut self, _app: &mut App, f: &mut Frame) {
+    pub fn draw(&mut self, _manager: &mut Manager, f: &mut Frame) {
         self.refresh();
 
         let area = f.area();

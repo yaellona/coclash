@@ -1,15 +1,15 @@
-use crate::command::mihomo::MihomoStatus;
-use crate::config::mihomo_config::MihomoConfig;
-use crate::config::node::Node;
+﻿use crate::core::mihomo::MihomoStatus;
+use crate::core::config::mihomo_config::MihomoConfig;
+use crate::core::config::node::Node;
 use crate::operation_log::OperationLogs;
 
-/// 全局唯一数据源：UI 只读渲染，任务结果经 `App::apply` 更新。
+/// 鍏ㄥ眬鍞竴鏁版嵁婧愶細UI 鍙娓叉煋锛屼换鍔＄粨鏋滅粡浠诲姟灞?`TaskEvent::apply` 鏇存柊銆?
 #[derive(Debug)]
 pub struct AppState {
     pub nodes: Vec<Node>,
-    /// 节点列表光标位置
+    /// 鑺傜偣鍒楄〃鍏夋爣浣嶇疆
     pub select: usize,
-    /// 当前选中（生效）的代理节点下标
+    /// 褰撳墠閫変腑锛堢敓鏁堬級鐨勪唬鐞嗚妭鐐逛笅鏍?
     pub active_node: Option<usize>,
     pub mihomo_status: MihomoStatus,
     pub proxy_running: bool,
@@ -23,7 +23,7 @@ impl AppState {
         self.config.tun.as_ref().is_some_and(|t| t.enable)
     }
 
-    /// 代理监听地址（以 config.yaml 端口为准）
+    /// 浠ｇ悊鐩戝惉鍦板潃锛堜互 config.yaml 绔彛涓哄噯锛?
     pub fn proxy_addr(&self) -> String {
         format!("127.0.0.1:{}", self.config.port)
     }

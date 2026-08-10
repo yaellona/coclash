@@ -1,6 +1,6 @@
 //! 状态信息组件（只读展示）。
-use crate::app::state::AppState;
-use crate::command::mihomo::MihomoStatus;
+use crate::manager::state::AppState;
+use crate::core::mihomo::MihomoStatus;
 use ratatui::{
     layout::Constraint,
     style::Color,

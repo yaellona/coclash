@@ -1,19 +1,6 @@
-﻿//! 过程宏 re-export：`#[window]`（窗口 impl 标注）+ `crate::windows!`（注册表）。
-pub use coclash_macros::{window, windows};
-
-mod app;
-mod command;
-mod config;
-mod constants;
-mod error;
-mod operation_log;
-mod settings;
-#[cfg(test)]
-mod test;
-mod ui;
-
-use app::App;
-use command::mihomo::MihomoStatus;
+﻿//! 入口：终端初始化 + 事件循环，业务逻辑见 `coclash` 库。
+use coclash::core::mihomo::MihomoStatus;
+use coclash::{manager, tui};
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -41,12 +28,12 @@ impl Drop for TerminalGuard {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 先完成所有可能失败的 IO 初始化，再进入 raw mode / alternate screen
-    let mut app = App::new()?;
-    match app.state.mihomo_status {
-        MihomoStatus::Stopped => app.start_mihomo(),
+    let mut manager = manager::Manager::new()?;
+    match manager.state.mihomo_status {
+        MihomoStatus::Stopped => manager.start_mihomo(),
         _ => {
-            app.log("检测到mihomo已在运行");
-            app.load_nodes();
+            manager.log("检测到mihomo已在运行");
+            manager.load_nodes();
         }
     }
 
@@ -56,15 +43,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut windows = ui::Windows::new(&app);
+    let mut windows = tui::Windows::new(&manager);
 
     loop {
-        terminal.draw(|f| windows.draw(&mut app, f))?;
-        if let Some(key) = app::event::poll_event(&app.settings)? {
-            windows.handle_key(&mut app, key);
+        terminal.draw(|f| windows.draw(&mut manager, f))?;
+        if let Some(key) = tui::event::poll_event(&manager.settings)? {
+            windows.handle_key(&mut manager, key);
         }
-        app.drain_tasks();
-        if app.should_quit {
+        manager.drain_tasks();
+        if manager.should_quit {
             break;
         }
     }
