@@ -22,9 +22,9 @@ pub trait Window {
     /// 打开页面时触发
     fn on_open(&mut self);
 
-    /// 绘制（弹窗由注册表先画父页面再叠加）
-    fn draw(&mut self, manager: &mut Manager, f: &mut Frame);
+    /// 绘制（弹窗由注册表先画父页面再叠加）；TUI 只读，修改请走 Manager 命令
+    fn draw(&mut self, manager: &Manager, f: &mut Frame);
 
     /// 按键分发：返回 `Some(page)` 表示请求导航；由 `#[window]` 宏生成
-    fn handle_key(&mut self, manager: &mut Manager, key: KeyEvent) -> Option<Page>;
+    fn handle_key(&mut self, manager: &Manager, key: KeyEvent) -> Option<Page>;
 }

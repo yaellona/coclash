@@ -37,8 +37,6 @@ const NARROW_THRESHOLD: u16 = 70;
 pub struct MainWindow {
     pub focus: Panel,
     pub operation_log: OperationLog,
-    /// 上次绘制时的操作日志可见高度（翻页用）
-    log_visible: usize,
 }
 
 #[window]
@@ -47,45 +45,40 @@ impl MainWindow {
         Self {
             focus: Panel::Content,
             operation_log: OperationLog::new(),
-            log_visible: 1,
         }
     }
 
     pub fn on_open(&mut self) {}
 
-    fn navigate(&mut self, manager: &mut Manager, step: i32) {
-        let len = manager.state.nodes.len();
-        if len == 0 {
-            return;
-        }
-        manager.state.select = wrap(manager.state.select, len, step);
+    fn navigate(&mut self, manager: &Manager, step: i32) {
+        manager.state_lock().navigate(step);
     }
 
     #[key(KeyCode::Char('q'), "退出", footer = true)]
-    fn quit(&mut self, manager: &mut Manager) -> Option<Page> {
-        manager.should_quit = true;
+    fn quit(&mut self, manager: &Manager) -> Option<Page> {
+        manager.should_quit.store(true, std::sync::atomic::Ordering::Relaxed);
         None
     }
 
     #[key(KeyCode::Char('?'), "帮助", footer = true)]
-    fn open_help(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn open_help(&mut self, _manager: &Manager) -> Option<Page> {
         Some(Page::Help)
     }
 
     #[key(KeyCode::Tab, "切换面板", footer = false)]
-    fn cycle_panel(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn cycle_panel(&mut self, _manager: &Manager) -> Option<Page> {
         self.focus = self.focus.cycle();
         None
     }
 
     #[key(KeyCode::Esc, "回到节点列表", footer = false)]
-    fn reset_focus(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn reset_focus(&mut self, _manager: &Manager) -> Option<Page> {
         self.focus = Panel::Content;
         None
     }
 
     #[key(KeyCode::Up, "导航", footer = true)]
-    fn up(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn up(&mut self, manager: &Manager) -> Option<Page> {
         match self.focus {
             Panel::OperationLog => self.operation_log.up(),
             Panel::Content => self.navigate(manager, -1),
@@ -94,10 +87,10 @@ impl MainWindow {
     }
 
     #[key(KeyCode::Down, "导航", footer = true)]
-    fn down(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn down(&mut self, manager: &Manager) -> Option<Page> {
         match self.focus {
             Panel::OperationLog => {
-                let total = manager.state.logs.len();
+                let total = manager.state_lock().logs.len();
                 self.operation_log.down(total);
             }
             Panel::Content => self.navigate(manager, 1),
@@ -106,85 +99,89 @@ impl MainWindow {
     }
 
     #[key(KeyCode::PageUp, "翻页", footer = false)]
-    fn page_up(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn page_up(&mut self, _manager: &Manager) -> Option<Page> {
         if self.focus == Panel::OperationLog {
-            self.operation_log.page_up(self.log_visible);
+            self.operation_log.page_up();
         }
         None
     }
 
     #[key(KeyCode::PageDown, "翻页", footer = false)]
-    fn page_down(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn page_down(&mut self, manager: &Manager) -> Option<Page> {
         if self.focus == Panel::OperationLog {
-            let total = manager.state.logs.len();
-            self.operation_log.page_down(total, self.log_visible);
+            let total = manager.state_lock().logs.len();
+            self.operation_log.page_down(total);
         }
         None
     }
 
     #[key(KeyCode::Char('s'), "开关mihomo", footer = false)]
-    fn toggle_mihomo(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn toggle_mihomo(&mut self, manager: &Manager) -> Option<Page> {
         manager.toggle_mihomo();
         None
     }
 
     #[key(KeyCode::Char('p'), "系统代理", footer = false)]
-    fn toggle_system_proxy(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn toggle_system_proxy(&mut self, manager: &Manager) -> Option<Page> {
         manager.toggle_system_proxy();
         None
     }
 
     #[key(KeyCode::Char('T'), "TUN", footer = false)]
-    fn toggle_tun(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn toggle_tun(&mut self, manager: &Manager) -> Option<Page> {
         manager.toggle_tun();
         None
     }
 
-    #[key(KeyCode::Char('c'), "切换代理", footer = false)]
-    fn provider_select(&mut self, _manager: &mut Manager) -> Option<Page> {
+    #[key(KeyCode::Char('c'), "切换订阅", footer = false)]
+    fn provider_select(&mut self, _manager: &Manager) -> Option<Page> {
         Some(Page::ProviderSelect)
     }
 
     #[key(KeyCode::Char('t'), "测速", footer = false)]
-    fn delay_test(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn delay_test(&mut self, manager: &Manager) -> Option<Page> {
         manager.start_delay_test();
         None
     }
 
     #[key(KeyCode::Char('r'), "刷新节点", footer = false)]
-    fn refresh_nodes(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn refresh_nodes(&mut self, manager: &Manager) -> Option<Page> {
         manager.load_nodes();
         None
     }
 
     #[key(KeyCode::Char('u'), "添加订阅", footer = false)]
-    fn add_subscription(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn add_subscription(&mut self, _manager: &Manager) -> Option<Page> {
         Some(Page::UrlInput)
     }
 
     #[key(KeyCode::Char('l'), "mihomo日志", footer = false)]
-    fn open_log(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn open_log(&mut self, _manager: &Manager) -> Option<Page> {
         Some(Page::MihomoLog)
     }
 
     #[key(KeyCode::Char('e'), "设置", footer = true)]
-    fn open_settings(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn open_settings(&mut self, _manager: &Manager) -> Option<Page> {
         Some(Page::Settings)
     }
 
     #[key(KeyCode::Enter, "选中节点", footer = false)]
-    fn select_node(&mut self, manager: &mut Manager) -> Option<Page> {
-        if self.focus == Panel::Content && !manager.state.nodes.is_empty() {
-            let index = manager.state.select;
+    fn select_node(&mut self, manager: &Manager) -> Option<Page> {
+        let (has_nodes, index) = {
+            let st = manager.state_lock();
+            (!st.nodes.is_empty(), st.select)
+        };
+        if self.focus == Panel::Content && has_nodes {
             manager.switch_node(index);
         }
         None
     }
 
-    pub fn draw(&mut self, manager: &mut Manager, f: &mut Frame) {
+    pub fn draw(&mut self, manager: &Manager, f: &mut Frame) {
         let size = f.area();
         let footer_text = footer_text();
         let focus = self.focus;
+        let state = manager.state_lock();
 
         //底部快捷键区域和其他区域
         let main_chunks = Layout::default()
@@ -210,23 +207,18 @@ impl MainWindow {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(INFO_HEIGHT), Constraint::Min(0)])
                 .split(chunks2[1]);
-            let info = widgets::RunningInfo::render(&manager.state);
+            let info = widgets::RunningInfo::render(&state);
             f.render_widget(info, chunks3[0]);
 
             let width = chunks2[1].width.saturating_sub(10).max(1) as usize;
             let height = chunks3[1].height.max(1) as usize;
-            self.log_visible = height;
-            let log = self.operation_log.render(
-                &manager.state.logs,
-                width,
-                height,
-                focus == Panel::OperationLog,
-            );
+            self.operation_log.update(&state.logs, width, height);
+            let log = self.operation_log.render(focus == Panel::OperationLog);
             f.render_widget(log, chunks3[1]);
         }
 
-        let select = manager.state.select;
-        let content = widgets::Content::render(&manager.state.nodes, focus == Panel::Content);
+        let select = state.select;
+        let content = widgets::Content::render(&state.nodes, focus == Panel::Content);
         f.render_stateful_widget(
             &content,
             chunks2[0],
@@ -235,23 +227,9 @@ impl MainWindow {
     }
 }
 
-/// 选择下标回绕（独立纯函数便于测试）
-fn wrap(select: usize, len: usize, step: i32) -> usize {
-    (select as i32 + step).rem_euclid(len as i32) as usize
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Panel, wrap};
-
-    #[test]
-    fn test_wrap_around() {
-        assert_eq!(wrap(0, 2, 1), 1);
-        assert_eq!(wrap(1, 2, 1), 0);
-        assert_eq!(wrap(0, 2, -1), 1);
-        assert_eq!(wrap(1, 2, -1), 0);
-        assert_eq!(wrap(0, 1, 5), 0);
-    }
+    use super::Panel;
 
     #[test]
     fn test_panel_cycle() {

@@ -1,237 +1,200 @@
-//! 任务层：任务发起（`TaskBus`）与结果回灌（`TaskEvent::apply`）自成一体。
+//! 任务层：异步任务发起与结果回灌，自成一体。
 //! `Manager` 只做一行转发，不感知任何任务细节。
-use crate::core::config::node::Node;
+//!
+//! # 并发纪律
+//!
+//! - 全项目共享状态只有一把锁：`Mutex<AppState>`（`TaskRunner.state`）
+//! - **绝不跨 `await` 持有锁**：每个任务分三段——短临界区（预置）→
+//!   `await`（无锁）→ 短临界区（回灌）
+//! - HTTP 请求、轮询等慢操作一律在锁外；config 序列化 + 写盘（<1ms）允许锁内
+//! - 锁内只做微秒级操作，毒锁由 `Manager::state_lock` 统一恢复
+use crate::manager::state::Node;
 use crate::core::mihomo::{self, ApiClient};
-use crate::core::mihomo::api::ProxyReport;
 use crate::error::Error;
 use crate::manager::state::AppState;
 use crate::operation_log::LogType;
 use crate::settings::Settings;
-use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
-/// 任务完成事件（C# 事件模型：任务执行 → 触发事件 → 挂载的 apply 自动回灌）
-#[derive(Debug)]
-pub enum TaskEvent {
-    /// 启动 mihomo 后端口是否就绪
-    MihomoReady {
-        ready: bool,
-    },
-    NodesFetched {
-        result: Result<ProxyReport, Error>,
-    },
-    DelaysFetched {
-        result: Result<HashMap<String, u32>, Error>,
-    },
-    NodeSwitched {
-        name: String,
-        result: Result<(), Error>,
-    },
-    ConfigReloaded {
-        result: Result<(), Error>,
-    },
-    ProviderNameFetched {
-        url: String,
-        result: Result<String, Error>,
-    },
-}
-
-impl TaskEvent {
-    /// 结果回灌：状态更新 + 操作记录 + 续发任务，全部在 TUI 之下完成
-    pub fn apply(self, state: &mut AppState, bus: &TaskBus) {
-        match self {
-            TaskEvent::MihomoReady { ready } => {
-                if ready {
-                    state.logs.add_log(LogType::Info, "mihomo 已就绪，正在拉取节点".into());
-                    bus.load_nodes();
-                } else {
-                    state.logs.add_log(
-                        LogType::Warn,
-                        "进程已启动但端口未就绪（启动可能较慢或失败），可按 s 停止后重试".into(),
-                    );
-                }
-            }
-            TaskEvent::NodesFetched { result } => match result {
-                Ok(proxy) => {
-                    state.nodes = vec![];
-                    state.select = 0;
-                    state.active_node = None;
-                    for (index, node) in proxy.all.into_iter().enumerate() {
-                        if node == proxy.now {
-                            state.active_node = Some(index);
-                            state.select = index;
-                        }
-                        state.nodes.push(Node::new(node));
-                    }
-                    state.logs.add_log(LogType::Info, "更新代理信息".into());
-                }
-                Err(e) => state.logs.add_log(LogType::Error, e.to_string()),
-            },
-            TaskEvent::DelaysFetched { result } => {
-                state.is_test_delay = false;
-                match result {
-                    Ok(map) => {
-                        for node in &mut state.nodes {
-                            node.speed = match map.get(&node.name) {
-                                Some(&d) => format!("{d}ms"),
-                                None => "-".to_string(),
-                            };
-                        }
-                        state.logs.add_log(LogType::Info, "测速完成".into());
-                    }
-                    Err(e) => state.logs.add_log(LogType::Error, e.to_string()),
-                }
-            }
-            TaskEvent::NodeSwitched { name, result } => match result {
-                Ok(()) => state
-                    .logs
-                    .add_log(LogType::Info, format!("切换节点：{name}")),
-                Err(e) => state.logs.add_log(LogType::Error, e.to_string()),
-            },
-            TaskEvent::ConfigReloaded { result } => match result {
-                Ok(()) => {
-                    state.logs.add_log(LogType::Info, "重置配置成功".into());
-                    bus.load_nodes();
-                }
-                Err(e) => state.logs.add_log(LogType::Error, e.to_string()),
-            },
-            TaskEvent::ProviderNameFetched { url, result } => {
-                let name = match result {
-                    Ok(name) => name,
-                    Err(e) => {
-                        let n = state
-                            .config
-                            .proxy_providers
-                            .as_ref()
-                            .map(|p| p.len())
-                            .unwrap_or(0)
-                            + 1;
-                        let fallback = format!("订阅{n}");
-                        state.logs.add_log(
-                            LogType::Warn,
-                            format!("{e}，使用默认名称 {fallback}"),
-                        );
-                        fallback
-                    }
-                };
-                match state.config.insert_sub(url, name.clone(), &bus.config_path) {
-                    Ok(()) => {
-                        state
-                            .logs
-                            .add_log(LogType::Info, format!("插入代理商：{name}"));
-                        bus.reload_config();
-                    }
-                    Err(e) => state.logs.add_log(LogType::Error, e.to_string()),
-                }
-            }
-        }
-    }
-}
-
-/// 任务发起器：持有 api/设置/配置路径与发送端，`Manager` 只做转发
-pub struct TaskBus {
+/// 任务发起器：持有 api/设置/配置路径与共享状态，`Manager` 只做转发
+pub struct TaskRunner {
     api: Arc<ApiClient>,
     settings: Settings,
     config_path: PathBuf,
-    tx: mpsc::Sender<TaskEvent>,
+    state: Arc<Mutex<AppState>>,
 }
 
-impl TaskBus {
+impl TaskRunner {
     pub fn new(
         settings: &Settings,
         config_path: PathBuf,
         group_name: &str,
-        channel_capacity: usize,
-    ) -> Result<(Self, mpsc::Receiver<TaskEvent>), Error> {
+        state: Arc<Mutex<AppState>>,
+    ) -> Result<Self, Error> {
         let api = Arc::new(ApiClient::new(settings, group_name)?);
-        let (tx, rx) = mpsc::channel::<TaskEvent>(channel_capacity);
-        Ok((
-            Self {
-                api,
-                settings: settings.clone(),
-                config_path,
-                tx,
-            },
-            rx,
-        ))
+        Ok(Self {
+            api,
+            settings: settings.clone(),
+            config_path,
+            state,
+        })
     }
 
-    fn spawn(&self, fut: impl std::future::Future<Output = TaskEvent> + Send + 'static) {
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(fut.await).await;
-        });
+    fn spawn(&self, fut: impl std::future::Future<Output = ()> + Send + 'static) {
+        tokio::spawn(fut);
     }
 
+    /// 拉取节点列表并回灌（任务内部与成功续发共用）
     pub fn load_nodes(&self) {
         let api = self.api.clone();
+        let state = self.state.clone();
         self.spawn(async move {
-            TaskEvent::NodesFetched {
-                result: api.get_proxy().await,
+            load_nodes_impl(&api, &state).await;
+        });
+    }
+
+    /// 测速：预置 waiting 状态 → 异步测速 → 回灌结果
+    pub fn start_delay_test(&self) {
+        let api = self.api.clone();
+        let state = self.state.clone();
+        self.spawn(async move {
+            {
+                // 预置（守卫：已在测速则拒绝）
+                let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                if st.is_test_delay {
+                    st.logs.add_log(LogType::Warn, "已经在测速了!".into());
+                    return;
+                }
+                st.is_test_delay = true;
+                for node in &mut st.nodes {
+                    node.speed = "wait".to_string();
+                }
+            }
+            let result = api.fetch_delays().await;
+            // 回灌
+            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+            st.is_test_delay = false;
+            match result {
+                Ok(map) => {
+                    for node in &mut st.nodes {
+                        node.speed = match map.get(&node.name) {
+                            Some(&d) => format!("{d}ms"),
+                            None => "-".to_string(),
+                        };
+                    }
+                    st.logs.add_log(LogType::Info, "测速完成".into());
+                }
+                Err(e) => st.logs.add_log(LogType::Error, e.to_string()),
             }
         });
     }
 
-    /// 测速：守卫 + 预置 waiting 状态，然后发起异步测速
-    pub fn start_delay_test(&self, state: &mut AppState) {
-        if state.is_test_delay {
-            state.logs.add_log(LogType::Warn, "已经在测速了!".into());
-            return;
-        }
-        state.is_test_delay = true;
-        for node in &mut state.nodes {
-            node.speed = "wait".to_string();
-        }
+    /// 切换节点：乐观预置 active_node → 异步切换 → 回灌日志
+    /// 守卫：切换进行中拒绝新任务（连按 Enter 不产生交错请求）
+    pub fn switch_node(&self, index: usize) {
         let api = self.api.clone();
+        let state = self.state.clone();
         self.spawn(async move {
-            TaskEvent::DelaysFetched {
-                result: api.fetch_delays().await,
-            }
-        });
-    }
-
-    pub fn switch_node(&self, state: &mut AppState, index: usize) {
-        let Some(node) = state.nodes.get(index) else {
-            return;
-        };
-        state.active_node = Some(index);
-        let name = node.name.clone();
-        let api = self.api.clone();
-        self.spawn(async move {
+            let name = {
+                // 预置
+                let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                if st.is_switching_node {
+                    st.logs.add_log(LogType::Warn, "正在切换节点，请稍候".into());
+                    return;
+                }
+                let Some(node) = st.nodes.get(index) else {
+                    return;
+                };
+                let name = node.name.clone();
+                st.is_switching_node = true;
+                st.active_node = Some(index);
+                name
+            };
             let result = api.switch_node(&name).await;
-            TaskEvent::NodeSwitched { name, result }
+            // 回灌
+            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+            st.is_switching_node = false;
+            match result {
+                Ok(()) => st.logs.add_log(LogType::Info, format!("切换节点：{name}")),
+                Err(e) => st.logs.add_log(LogType::Error, e.to_string()),
+            }
         });
     }
 
+    /// 重载配置，成功后续发拉取节点
     pub fn reload_config(&self) {
         let api = self.api.clone();
         let path = self.config_path.clone();
+        let state = self.state.clone();
         self.spawn(async move {
-            TaskEvent::ConfigReloaded {
-                result: api.reload_config(&path).await,
-            }
+            reload_config_impl(&api, &state, &path).await;
         });
     }
 
-    pub fn insert_sub(&self, state: &mut AppState, url: String) {
-        state.logs.add_log(LogType::Info, "正在验证URL...".into());
+    /// 添加订阅：验证 URL → 命名（失败兜底）→ 锁内插入 → 锁外写盘 → 重载
+    pub fn insert_sub(&self, url: String) {
         let api = self.api.clone();
+        let state = self.state.clone();
         let fetch_url = url.clone();
+        let config_path = self.config_path.clone();
         self.spawn(async move {
-            TaskEvent::ProviderNameFetched {
-                url,
-                result: api.get_provider_name(&fetch_url).await,
+            {
+                // 预置
+                let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                st.logs.add_log(LogType::Info, "正在验证URL...".into());
+            }
+            let result = api.get_provider_name(&fetch_url).await;
+            // 命名：失败时用"订阅{n}"兜底
+            let name = match result {
+                Ok(name) => name,
+                Err(e) => {
+                    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                    let n = st
+                        .config
+                        .proxy_providers
+                        .as_ref()
+                        .map(|p| p.len())
+                        .unwrap_or(0)
+                        + 1;
+                    let fallback = format!("订阅{n}");
+                    st.logs
+                        .add_log(LogType::Warn, format!("{e}，使用默认名称 {fallback}"));
+                    fallback
+                }
+            };
+            // 回灌：锁内纯内存插入
+            {
+                let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                st.config.insert_sub(url, name.clone());
+            }
+            // 锁外写盘 + 续发重载
+            match save_config(&state, &config_path) {
+                Ok(()) => {
+                    state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .logs
+                        .add_log(LogType::Info, format!("插入订阅：{name}"));
+                    reload_config_impl(&api, &state, &config_path).await;
+                }
+                Err(e) => state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .logs
+                    .add_log(LogType::Error, e.to_string()),
             }
         });
     }
 
-    /// 启动后就绪探测：轮询控制端口直到就绪或超时
+    /// 启动后就绪探测：轮询控制端口直到就绪或超时，就绪后拉取节点
     pub fn wait_for_start(&self) {
         let ctrl_addr = self.settings.mihomo_ctrl_addr.clone();
         let attempts = self.settings.provider_retry.max(1);
         let interval = self.settings.provider_retry_interval();
+        let api = self.api.clone();
+        let state = self.state.clone();
         self.spawn(async move {
             let mut ready = false;
             for _ in 0..attempts {
@@ -244,7 +207,75 @@ impl TaskBus {
             if !ready {
                 ready = mihomo::process::ctrl_addr_up_async(&ctrl_addr).await;
             }
-            TaskEvent::MihomoReady { ready }
+            if ready {
+                state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .logs
+                    .add_log(LogType::Info, "mihomo 已就绪，正在拉取节点".into());
+                load_nodes_impl(&api, &state).await;
+            } else {
+                state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .logs
+                    .add_log(
+                        LogType::Warn,
+                        "进程已启动但端口未就绪（启动可能较慢或失败），可按 s 停止后重试".into(),
+                    );
+            }
         });
     }
+
+    /// config 落盘：锁内序列化 → 锁外写盘（设置/代理窗口修改后的统一入口）
+    pub(crate) fn save_config(&self) -> Result<(), Error> {
+        save_config(&self.state, &self.config_path)
+    }
+}
+
+// ===== 任务实现（与 TaskRunner 方法一一对应，可被续发复用） =====
+
+/// 拉取节点列表并回灌到共享状态
+async fn load_nodes_impl(api: &ApiClient, state: &Arc<Mutex<AppState>>) {
+    match api.get_proxy().await {
+        Ok(proxy) => {
+            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+            st.active_node = proxy.all.iter().position(|n| *n == proxy.now);
+            st.nodes = proxy.all.into_iter().map(Node::new).collect();
+            // 列表变化后只收敛越界的光标，不跳回第一行（后台刷新不得打断用户浏览位置）
+            let max = st.nodes.len().saturating_sub(1);
+            st.select = st.select.min(max);
+            st.logs.add_log(LogType::Info, "更新代理信息".into());
+        }
+        Err(e) => state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .logs
+            .add_log(LogType::Error, e.to_string()),
+    }
+}
+
+/// 重载配置，成功后续发拉取节点
+async fn reload_config_impl(api: &ApiClient, state: &Arc<Mutex<AppState>>, path: &Path) {
+    match api.reload_config(path).await {
+        Ok(()) => {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .logs
+                .add_log(LogType::Info, "重置配置成功".into());
+            load_nodes_impl(api, state).await;
+        }
+        Err(e) => state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .logs
+            .add_log(LogType::Error, e.to_string()),
+    }
+}
+
+/// 锁内克隆（短临界区）→ 锁外序列化+写盘（统一收敛到 `MihomoConfig::write_to_path`）
+fn save_config(state: &Arc<Mutex<AppState>>, config_path: &Path) -> Result<(), Error> {
+    let config = state.lock().unwrap_or_else(|e| e.into_inner()).config.clone();
+    config.write_to_path(&PathBuf::from(config_path))
 }

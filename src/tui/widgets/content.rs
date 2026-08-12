@@ -1,5 +1,5 @@
 //! 节点列表组件：数据来自 AppState，本组件无状态。
-use crate::core::config::node::Node;
+use crate::manager::state::Node;
 use ratatui::{
     layout::Constraint,
     style::{Color, Style},

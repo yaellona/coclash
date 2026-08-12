@@ -55,39 +55,46 @@ impl MihomoLogWindow {
     }
 
     #[key(KeyCode::Esc, "关闭", footer = false)]
-    fn close(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn close(&mut self, _manager: &Manager) -> Option<Page> {
         Some(Page::Main)
     }
 
     #[key(KeyCode::Up, "导航", footer = false)]
-    fn up(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn up(&mut self, _manager: &Manager) -> Option<Page> {
         self.scroller.up();
         None
     }
 
     #[key(KeyCode::Down, "导航", footer = false)]
-    fn down(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn down(&mut self, _manager: &Manager) -> Option<Page> {
         let total = self.rows.len();
         self.scroller.down(total);
         None
     }
 
     #[key(KeyCode::PageUp, "翻页", footer = false)]
-    fn page_up(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn page_up(&mut self, _manager: &Manager) -> Option<Page> {
         self.scroller.page_up(self.visible);
         None
     }
 
     #[key(KeyCode::PageDown, "翻页", footer = false)]
-    fn page_down(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn page_down(&mut self, _manager: &Manager) -> Option<Page> {
         let total = self.rows.len();
         self.scroller.page_down(total, self.visible);
         None
     }
 
-    pub fn draw(&mut self, _manager: &mut Manager, f: &mut Frame) {
+    /// 每帧渲染前调用：读文件更新 + 折行 + 收敛滚动。
+    /// 状态副作用集中在此，`draw` 其余部分保持只读渲染。
+    fn update(&mut self, width: usize, height: usize) {
         self.refresh();
+        self.visible = height.saturating_sub(1).max(1);
+        self.rows = wrap_lines(&self.lines, width.max(1));
+        self.scroller.clamp(self.rows.len());
+    }
 
+    pub fn draw(&mut self, _manager: &Manager, f: &mut Frame) {
         let area = f.area();
         let block = Block::default()
             .title("mihomo 进程日志 (Esc 关闭, ↑↓/PgUp/PgDn 滚动)")
@@ -96,9 +103,7 @@ impl MihomoLogWindow {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        self.visible = inner.height.saturating_sub(1).max(1) as usize;
-        self.rows = wrap_lines(&self.lines, inner.width.max(1) as usize);
-        self.scroller.clamp(self.rows.len());
+        self.update(inner.width as usize, inner.height as usize);
         let (start, end) = self.scroller.viewport(self.rows.len(), self.visible);
 
         let text = if self.rows.is_empty() {
@@ -139,4 +144,25 @@ pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64, max_lines: usize
         lines.drain(0..lines.len() - max_lines);
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_read_tail() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("mihomo.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..100 {
+            writeln!(f, "line {i}").unwrap();
+        }
+        drop(f);
+        let lines = read_tail(&path, 128 * 1024, 10);
+        assert_eq!(lines.len(), 10);
+        assert_eq!(lines[0], "line 90");
+        assert_eq!(lines[9], "line 99");
+    }
 }

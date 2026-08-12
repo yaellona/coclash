@@ -35,37 +35,37 @@ impl HelpWindow {
     }
 
     #[key(KeyCode::Esc, "关闭", footer = false)]
-    fn close(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn close(&mut self, _manager: &Manager) -> Option<Page> {
         Some(Page::Main)
     }
 
     #[key(KeyCode::Up, "导航", footer = false)]
-    fn up(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn up(&mut self, _manager: &Manager) -> Option<Page> {
         self.scroller.up();
         None
     }
 
     #[key(KeyCode::Down, "导航", footer = false)]
-    fn down(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn down(&mut self, _manager: &Manager) -> Option<Page> {
         let total = help_rows(Page::Main).len();
         self.scroller.down(total);
         None
     }
 
     #[key(KeyCode::PageUp, "翻页", footer = false)]
-    fn page_up(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn page_up(&mut self, _manager: &Manager) -> Option<Page> {
         self.scroller.page_up(self.visible);
         None
     }
 
     #[key(KeyCode::PageDown, "翻页", footer = false)]
-    fn page_down(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn page_down(&mut self, _manager: &Manager) -> Option<Page> {
         let total = help_rows(Page::Main).len();
         self.scroller.page_down(total, self.visible);
         None
     }
 
-    pub fn draw(&mut self, _manager: &mut Manager, f: &mut Frame) {
+    pub fn draw(&mut self, _manager: &Manager, f: &mut Frame) {
         let area = popup_rect(f.area());
         f.render_widget(Clear, area);
 

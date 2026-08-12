@@ -1,8 +1,7 @@
 //! 设置窗口：字段视图 + 规则子视图。
 use crate::manager::Manager;
-use crate::core::config::mihomo_config::{Dns, Tun};
 use crate::tui::Page;
-use crate::tui::layout::{display_width, popup_rect};
+use crate::tui::layout::{display_width, popup_rect, wrap_index};
 use crate::window;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -68,16 +67,16 @@ impl SettingsWindow {
     }
 
     /// 关闭：仅当有改动时写盘 + 重载 mihomo
-    fn close(&mut self, manager: &mut Manager) {
+    fn close(&mut self, manager: &Manager) {
         if self.changed {
-            match manager.state.config.write_to_path(&manager.config_path) {
+            match manager.save_config() {
                 Ok(()) => manager.reload_config(),
                 Err(e) => manager.log_err(e),
             }
         }
     }
 
-    fn toggle_field(&mut self, manager: &mut Manager) {
+    fn toggle_field(&mut self, manager: &Manager) {
         let i = self.fields_select;
         if i >= FIELD_COUNT {
             return;
@@ -85,52 +84,36 @@ impl SettingsWindow {
         let kind = FIELDS[i].kind;
         match kind {
             FieldKind::Mode => {
-                manager.state.config.mode = cycle(&MODES, &manager.state.config.mode).to_string();
+                manager.edit_config(|c| c.mode = cycle(&MODES, &c.mode).to_string());
                 self.changed = true;
             }
             FieldKind::LogLevel => {
-                manager.state.config.log_level =
-                    cycle(&LOG_LEVELS, &manager.state.config.log_level).to_string();
+                manager.edit_config(|c| c.log_level = cycle(&LOG_LEVELS, &c.log_level).to_string());
                 self.changed = true;
             }
             FieldKind::AllowLan => {
-                manager.state.config.allow_lan = !manager.state.config.allow_lan;
+                manager.edit_config(|c| c.allow_lan = !c.allow_lan);
                 self.changed = true;
             }
             FieldKind::UnifiedDelay => {
-                manager.state.config.unified_delay = !manager.state.config.unified_delay;
+                manager.edit_config(|c| c.unified_delay = !c.unified_delay);
                 self.changed = true;
             }
             FieldKind::Tun => {
-                let on = !manager.state.config.tun.as_ref().is_some_and(|t| t.enable);
-                if on {
-                    let tun = manager
-                        .state
-                        .config
-                        .tun
-                        .get_or_insert_with(Tun::default_enabled);
-                    tun.enable = true;
-                    manager.state
-                        .config
-                        .dns
-                        .get_or_insert_with(Dns::default_enabled)
-                        .enable = true;
-                } else if let Some(t) = manager.state.config.tun.as_mut() {
-                    t.enable = false;
+                let on = !manager.state_lock().tun_enabled();
+                // 与 `T` 键（Manager::toggle_tun）共用同一份配置逻辑
+                manager.edit_config(|c| c.set_tun_enabled(on));
+                #[cfg(unix)]
+                if on
+                    && let Some(warn) = crate::core::mihomo::tun_capability_warning()
+                {
+                    manager.log_warn(warn);
                 }
                 self.changed = true;
             }
             FieldKind::Dns => {
-                let on = !manager.state.config.dns.as_ref().is_some_and(|d| d.enable);
-                if on {
-                    manager.state
-                        .config
-                        .dns
-                        .get_or_insert_with(Dns::default_enabled)
-                        .enable = true;
-                } else if let Some(d) = manager.state.config.dns.as_mut() {
-                    d.enable = false;
-                }
+                let on = !manager.state_lock().dns_enabled();
+                manager.edit_config(|c| c.set_dns_enabled(on));
                 self.changed = true;
             }
             FieldKind::Port | FieldKind::SocksPort | FieldKind::KeepAlive => {
@@ -142,30 +125,37 @@ impl SettingsWindow {
     }
 
     fn field_value(&self, manager: &Manager, kind: FieldKind) -> String {
+        let config = &manager.state_lock().config;
         match kind {
-            FieldKind::Mode => manager.state.config.mode.clone(),
-            FieldKind::Port => manager.state.config.port.to_string(),
-            FieldKind::SocksPort => manager.state.config.socks_port.to_string(),
-            FieldKind::AllowLan => on_off(manager.state.config.allow_lan),
-            FieldKind::LogLevel => manager.state.config.log_level.clone(),
-            FieldKind::UnifiedDelay => on_off(manager.state.config.unified_delay),
-            FieldKind::KeepAlive => manager.state.config.keep_alive_interval.to_string(),
-            FieldKind::Tun => on_off(manager.state.config.tun.as_ref().is_some_and(|t| t.enable)),
-            FieldKind::Dns => on_off(manager.state.config.dns.as_ref().is_some_and(|d| d.enable)),
-            FieldKind::Rules => format!("{} 条", manager.state.config.rules.len()),
+            FieldKind::Mode => config.mode.clone(),
+            FieldKind::Port => config.port.to_string(),
+            FieldKind::SocksPort => config.socks_port.to_string(),
+            FieldKind::AllowLan => on_off(config.allow_lan),
+            FieldKind::LogLevel => config.log_level.clone(),
+            FieldKind::UnifiedDelay => on_off(config.unified_delay),
+            FieldKind::KeepAlive => config.keep_alive_interval.to_string(),
+            FieldKind::Tun => on_off(config.tun.as_ref().is_some_and(|t| t.enable)),
+            FieldKind::Dns => on_off(config.dns.as_ref().is_some_and(|d| d.enable)),
+            FieldKind::Rules => format!("{} 条", config.rules.len()),
         }
     }
 
     /// 确认编辑：解析成功才写回配置
-    fn apply_edit(&mut self, manager: &mut Manager) {
+    fn apply_edit(&mut self, manager: &Manager) {
         let Some(edit) = self.editing.take() else {
             return;
         };
         if let Some(rule_idx) = edit.rule {
             if !edit.buffer.is_empty() {
-                let rules = &mut manager.state.config.rules;
-                if rule_idx < rules.len() {
-                    rules[rule_idx] = edit.buffer.clone();
+                let applied = manager.edit_config(|c| {
+                    if rule_idx < c.rules.len() {
+                        c.rules[rule_idx] = edit.buffer.clone();
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if applied {
                     self.changed = true;
                 }
             }
@@ -175,26 +165,26 @@ impl SettingsWindow {
             View::Rules => {
                 // 新增规则
                 if !edit.buffer.is_empty() {
-                    manager.state.config.rules.push(edit.buffer.clone());
+                    manager.edit_config(|c| c.rules.push(edit.buffer.clone()));
                     self.changed = true;
                 }
             }
             View::Fields => match FIELDS[self.fields_select].kind {
                 FieldKind::Port => {
                     if let Ok(v) = edit.buffer.parse::<u16>() {
-                        manager.state.config.port = v;
+                        manager.edit_config(|c| c.port = v);
                         self.changed = true;
                     }
                 }
                 FieldKind::SocksPort => {
                     if let Ok(v) = edit.buffer.parse::<u16>() {
-                        manager.state.config.socks_port = v;
+                        manager.edit_config(|c| c.socks_port = v);
                         self.changed = true;
                     }
                 }
                 FieldKind::KeepAlive => {
                     if let Ok(v) = edit.buffer.parse::<u32>() {
-                        manager.state.config.keep_alive_interval = v;
+                        manager.edit_config(|c| c.keep_alive_interval = v);
                         self.changed = true;
                     }
                 }
@@ -204,7 +194,7 @@ impl SettingsWindow {
     }
 
     fn rules_count(manager: &Manager) -> usize {
-        manager.state.config.rules.len()
+        manager.state_lock().config.rules.len()
     }
 
     fn clamp_rules_select(&mut self, manager: &Manager) {
@@ -222,24 +212,31 @@ impl SettingsWindow {
         if len == 0 {
             return;
         }
-        self.rules_select = (self.rules_select as i32 + step).rem_euclid(len as i32) as usize;
+        self.rules_select = wrap_index(self.rules_select, len, step);
     }
 
-    fn delete_rule(&mut self, manager: &mut Manager) {
-        let rules = &mut manager.state.config.rules;
-        if rules.is_empty() {
+    fn delete_rule(&mut self, manager: &Manager) {
+        let len = Self::rules_count(manager);
+        if len == 0 {
             return;
         }
-        rules.remove(self.rules_select.min(rules.len() - 1));
+        let idx = self.rules_select.min(len - 1);
+        manager.edit_config(|c| c.rules.remove(idx));
         self.changed = true;
         self.clamp_rules_select(manager);
     }
 
     fn start_edit_rule(&mut self, manager: &Manager) {
-        let Some(rule) = manager.state.config.rules.get(self.rules_select) else {
+        let rule = manager
+            .state_lock()
+            .config
+            .rules
+            .get(self.rules_select)
+            .cloned();
+        let Some(rule) = rule else {
             return;
         };
-        self.editing = Some(EditState::rule(Some(self.rules_select), rule.clone()));
+        self.editing = Some(EditState::rule(Some(self.rules_select), rule));
     }
 
     fn start_add_rule(&mut self, manager: &Manager) {
@@ -248,7 +245,7 @@ impl SettingsWindow {
     }
 
     #[key(KeyCode::Esc, "保存并关闭", footer = false)]
-    fn esc(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn esc(&mut self, manager: &Manager) -> Option<Page> {
         if self.editing.is_some() {
             self.editing = None;
             None
@@ -262,7 +259,7 @@ impl SettingsWindow {
     }
 
     #[key(KeyCode::Enter, "编辑/切换", footer = false)]
-    fn enter(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn enter(&mut self, manager: &Manager) -> Option<Page> {
         if self.editing.is_some() {
             self.apply_edit(manager);
         } else {
@@ -275,11 +272,11 @@ impl SettingsWindow {
     }
 
     #[key(KeyCode::Up, "导航", footer = false)]
-    fn up(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn up(&mut self, manager: &Manager) -> Option<Page> {
         if self.editing.is_none() {
             match self.view {
                 View::Fields => {
-                    self.fields_select = (self.fields_select + FIELD_COUNT - 1) % FIELD_COUNT;
+                    self.fields_select = wrap_index(self.fields_select, FIELD_COUNT, -1);
                 }
                 View::Rules => self.navigate_rules(manager, -1),
             }
@@ -288,10 +285,10 @@ impl SettingsWindow {
     }
 
     #[key(KeyCode::Down, "导航", footer = false)]
-    fn down(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn down(&mut self, manager: &Manager) -> Option<Page> {
         if self.editing.is_none() {
             match self.view {
-                View::Fields => self.fields_select = (self.fields_select + 1) % FIELD_COUNT,
+                View::Fields => self.fields_select = wrap_index(self.fields_select, FIELD_COUNT, 1),
                 View::Rules => self.navigate_rules(manager, 1),
             }
         }
@@ -299,7 +296,7 @@ impl SettingsWindow {
     }
 
     #[key(KeyCode::Char('r'), "规则", footer = false)]
-    fn show_rules(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn show_rules(&mut self, _manager: &Manager) -> Option<Page> {
         if self.editing.is_none() && self.view == View::Fields {
             self.view = View::Rules;
         }
@@ -307,7 +304,7 @@ impl SettingsWindow {
     }
 
     #[key(KeyCode::Char('a'), "添加规则", footer = false)]
-    fn add_rule(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn add_rule(&mut self, manager: &Manager) -> Option<Page> {
         if self.editing.is_none() && self.view == View::Rules {
             self.start_add_rule(manager);
         }
@@ -315,7 +312,7 @@ impl SettingsWindow {
     }
 
     #[key(KeyCode::Char('d'), "删除规则", footer = false)]
-    fn remove_rule(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn remove_rule(&mut self, manager: &Manager) -> Option<Page> {
         if self.editing.is_none() && self.view == View::Rules {
             self.delete_rule(manager);
         }
@@ -323,7 +320,7 @@ impl SettingsWindow {
     }
 
     #[key(KeyCode::Char(_))]
-    fn input_char(&mut self, _manager: &mut Manager, key: KeyEvent) -> Option<Page> {
+    fn input_char(&mut self, _manager: &Manager, key: KeyEvent) -> Option<Page> {
         if let Some(edit) = self.editing.as_mut()
             && let KeyCode::Char(c) = key.code
         {
@@ -339,14 +336,14 @@ impl SettingsWindow {
     }
 
     #[key(KeyCode::Backspace)]
-    fn backspace(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn backspace(&mut self, _manager: &Manager) -> Option<Page> {
         if let Some(edit) = self.editing.as_mut() {
             edit.buffer.pop();
         }
         None
     }
 
-    pub fn draw(&mut self, manager: &mut Manager, f: &mut Frame) {
+    pub fn draw(&mut self, manager: &Manager, f: &mut Frame) {
         let area = popup_rect(f.area());
         f.render_widget(Clear, area);
 
@@ -405,7 +402,7 @@ impl SettingsWindow {
     }
 
     fn rule_lines(&mut self, manager: &Manager, height: usize) -> Vec<Line<'_>> {
-        let rules = &manager.state.config.rules;
+        let rules: Vec<String> = manager.state_lock().config.rules.clone();
         let visible = height.saturating_sub(1).max(1);
         if rules.is_empty() {
             self.rules_scroll = 0;

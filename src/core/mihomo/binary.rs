@@ -217,3 +217,133 @@ fn default_mihomo_name() -> &'static str {
 fn default_mihomo_name() -> &'static str {
     "mihomo"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_env_file() {
+        let map = parse_env_file(
+            "# comment\n\nMIHOMO_EXE=/usr/bin/mihomo\nEMPTY=\nQUOTED=\"a b\"\nBADLINE\n",
+        );
+        assert_eq!(map.get("MIHOMO_EXE").unwrap(), "/usr/bin/mihomo");
+        assert_eq!(map.get("QUOTED").unwrap(), "a b");
+        assert_eq!(map.get("EMPTY").unwrap(), "");
+        assert!(!map.contains_key("BADLINE"));
+    }
+
+    #[test]
+    fn test_resolve_env_var_wins() {
+        let settings = Settings::default();
+        let dir = tempfile::TempDir::new().unwrap();
+        let r = resolve_mihomo_exe_with(
+            &settings,
+            Some("/from/env/mihomo".to_string()),
+            Some(&dir.path().join(".env")),
+            None,
+        );
+        assert_eq!(r.cmd, "/from/env/mihomo");
+        assert_eq!(r.source, BinarySource::EnvVar);
+    }
+
+    #[test]
+    fn test_resolve_env_file_wins_over_settings() {
+        let settings = Settings {
+            mihomo_exe: "C:\\explicit\\mihomo.exe".to_string(),
+            ..Settings::default()
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        std::fs::write(&env_path, "MIHOMO_EXE=mihomo.exe\n").unwrap();
+        let r = resolve_mihomo_exe_with(&settings, None, Some(&env_path), None);
+        assert_eq!(r.source, BinarySource::EnvFile);
+        assert!(r.cmd.contains("mihomo.exe"));
+    }
+
+    #[test]
+    fn test_resolve_env_file_relative_joins_dir() {
+        let settings = Settings::default();
+        let dir = tempfile::TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        std::fs::write(&env_path, "MIHOMO_EXE=mihomo.exe\n").unwrap();
+        let r = resolve_mihomo_exe_with(&settings, None, Some(&env_path), None);
+        assert_eq!(
+            r.cmd,
+            dir.path().join("mihomo.exe").to_string_lossy().into_owned()
+        );
+        assert_eq!(r.source, BinarySource::EnvFile);
+    }
+
+    #[test]
+    fn test_resolve_settings_explicit_path() {
+        let settings = Settings {
+            mihomo_exe: "/opt/bin/mihomo".to_string(),
+            ..Settings::default()
+        };
+        let r = resolve_mihomo_exe_with(&settings, None, None, None);
+        assert_eq!(r.cmd, "/opt/bin/mihomo");
+        assert_eq!(r.source, BinarySource::Settings);
+    }
+
+    #[test]
+    fn test_resolve_wrapper_precedes_path() {
+        let settings = Settings::default();
+        let r = resolve_mihomo_exe_with(
+            &settings,
+            None,
+            None,
+            Some(std::path::PathBuf::from("/run/wrappers/bin/mihomo")),
+        );
+        assert_eq!(r.source, BinarySource::NixWrapper);
+        assert_eq!(r.cmd, "/run/wrappers/bin/mihomo");
+    }
+
+    #[test]
+    fn test_resolve_fallback_to_path() {
+        let settings = Settings::default();
+        // 显式传入 wrapper=None，避免依赖宿主环境（如 NixOS 的 /run/wrappers）
+        let r = resolve_mihomo_exe_with(&settings, None, None, None);
+        assert_eq!(r.source, BinarySource::Path);
+        assert!(!r.cmd.is_empty());
+
+        let settings2 = Settings {
+            mihomo_exe: "my-mihomo".to_string(),
+            ..Settings::default()
+        };
+        let r2 = resolve_mihomo_exe_with(&settings2, None, None, None);
+        assert_eq!(r2.cmd, "my-mihomo");
+        assert_eq!(r2.source, BinarySource::Path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_find_on_path_windows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("mihomo-windows-amd64.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        let path = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(
+            find_on_path(&path, "mihomo-windows-amd64.exe"),
+            Some(exe.to_string_lossy().into_owned())
+        );
+        assert_eq!(find_on_path(&path, "missing.exe"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_mihomo_windows_candidates_prefers_current_arch() {
+        let names = mihomo_windows_candidates();
+        let expected_arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            "x86" => "386",
+            other => other,
+        };
+        assert_eq!(names[0], format!("mihomo-windows-{expected_arch}.exe"));
+        assert!(names.len() >= 3);
+        for a in ["amd64", "arm64", "386"] {
+            assert!(names.iter().any(|n| n.ends_with(&format!("{a}.exe"))));
+        }
+    }
+}

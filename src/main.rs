@@ -28,8 +28,9 @@ impl Drop for TerminalGuard {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 先完成所有可能失败的 IO 初始化，再进入 raw mode / alternate screen
-    let mut manager = manager::Manager::new()?;
-    match manager.state.mihomo_status {
+    let manager = manager::Manager::new()?;
+    let status = manager.state_lock().mihomo_status;
+    match status {
         MihomoStatus::Stopped => manager.start_mihomo(),
         _ => {
             manager.log("检测到mihomo已在运行");
@@ -46,12 +47,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut windows = tui::Windows::new(&manager);
 
     loop {
-        terminal.draw(|f| windows.draw(&mut manager, f))?;
+        terminal.draw(|f| windows.draw(&manager, f))?;
         if let Some(key) = tui::event::poll_event(&manager.settings)? {
-            windows.handle_key(&mut manager, key);
+            windows.handle_key(&manager, key);
         }
-        manager.drain_tasks();
-        if manager.should_quit {
+        if manager.should_quit.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
     }

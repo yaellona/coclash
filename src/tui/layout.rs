@@ -6,6 +6,12 @@ pub fn display_width(s: &str) -> usize {
     s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
 }
 
+/// 选择下标环绕：`select` 以 `len` 为模移动 `step`（负步长向前，正步长向后）。
+/// 调用方需保证 `len > 0`（列表为空时先短路）。
+pub fn wrap_index(select: usize, len: usize, step: i32) -> usize {
+    (select as i32 + step).rem_euclid(len as i32) as usize
+}
+
 /// 按显示宽度逐字折行，返回展平后的行列表（空行保留为空字符串）
 pub fn wrap_lines(lines: &[String], width: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -70,6 +76,15 @@ mod tests {
         assert_eq!(display_width("SOCKS 端口"), 10);
         assert_eq!(display_width("混合端口"), 8);
         assert_eq!(display_width("abc"), 3);
+    }
+
+    #[test]
+    fn test_wrap_index() {
+        assert_eq!(wrap_index(0, 2, 1), 1);
+        assert_eq!(wrap_index(1, 2, 1), 0);
+        assert_eq!(wrap_index(0, 2, -1), 1);
+        assert_eq!(wrap_index(1, 2, -1), 0);
+        assert_eq!(wrap_index(0, 1, 5), 0);
     }
 
     #[test]

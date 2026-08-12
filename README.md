@@ -48,6 +48,10 @@ GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net
 - 启动失败但进程残留时（端口未就绪），仍可按 `s` 停止。
 - mihomo 进程的 stdout/stderr 会写入 `{config_dir}/coclash/mihomo.log`，按 `l` 可在 TUI 内查看。
 
+### mihomo API
+
+TUI 通过 mihomo 的 external-controller RESTful API 交互（拉取节点、测速、切换节点/订阅、重载配置），接口与错误语义见 [mihomo-api.md](./mihomo-api.md)。
+
 ## 界面展示
 
 1. windows中
@@ -65,4 +69,4 @@ GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net
 3. ~~打nix包。~~
 4. ~~静默启动。~~
 5. ~~mihomo的进程和tui解耦，关闭tui不关闭mihomo~~
-6. 提供直连、规则、端口等修改。
+6. ~~提供直连、规则、端口等修改。~~（设置窗口 `e`：模式/端口/规则编辑）

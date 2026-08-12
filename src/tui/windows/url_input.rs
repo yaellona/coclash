@@ -26,13 +26,13 @@ impl UrlInputWindow {
     pub fn on_open(&mut self) {}
 
     #[key(KeyCode::Esc, "取消", footer = false)]
-    fn cancel(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn cancel(&mut self, _manager: &Manager) -> Option<Page> {
         self.input.clear();
         Some(Page::Main)
     }
 
     #[key(KeyCode::Enter, "确认", footer = false)]
-    fn confirm(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn confirm(&mut self, manager: &Manager) -> Option<Page> {
         if self.input.is_empty() {
             return None;
         }
@@ -43,20 +43,20 @@ impl UrlInputWindow {
     }
 
     #[key(KeyCode::Backspace, "删除字符", footer = false)]
-    fn backspace(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn backspace(&mut self, _manager: &Manager) -> Option<Page> {
         self.input.pop();
         None
     }
 
     #[key(KeyCode::Char(_))]
-    fn input_char(&mut self, _manager: &mut Manager, key: KeyEvent) -> Option<Page> {
+    fn input_char(&mut self, _manager: &Manager, key: KeyEvent) -> Option<Page> {
         if let KeyCode::Char(c) = key.code {
             self.input.push(c);
         }
         None
     }
 
-    pub fn draw(&mut self, _manager: &mut Manager, f: &mut Frame) {
+    pub fn draw(&mut self, _manager: &Manager, f: &mut Frame) {
         let area = popup_rect(f.area());
 
         f.render_widget(Clear, area);

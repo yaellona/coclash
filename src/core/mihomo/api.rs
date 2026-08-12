@@ -42,7 +42,7 @@ impl ApiClient {
             .map_err(|e| Error::Api(format!("创建HTTP客户端失败: {e}")))?;
         Ok(Self {
             client,
-            base_url: settings.mihomo_api.clone(),
+            base_url: settings.api_url(),
             group: if group.is_empty() {
                 DEFAULT_GROUP.to_string()
             } else {

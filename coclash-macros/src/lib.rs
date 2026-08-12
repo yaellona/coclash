@@ -1,12 +1,20 @@
 //! coclash 的 TUI 开发宏。
 //!
-//! 两个宏配合使用，注册表收敛在 `src/ui/windows/mod.rs` 一个文件：
+//! 两个宏配合使用，注册表收敛在 `src/tui/windows/mod.rs` 一个文件：
 //!
 //! - `#[window]`：impl 级属性宏。窗口自身声明弹窗属性
 //!   （`#[window(popup over Main)]`），校验 `on_open`/`draw` 契约，
 //!   收集 `#[key(...)]` 方法，生成 `KEYS` 元数据与 `impl Window`（含按键分发）。
 //! - `windows!`：函数式宏，展开生成 `Page` 枚举、`Windows` 结构体、
 //!   导航/绘制分发（弹窗叠加顺序取自各窗口 `Window::meta`）与 `BINDINGS` 聚合。
+//!
+//! # 隐式约定（由宏推导，改名即改变语义）
+//!
+//! - `Page` 变体名与 `Windows` 字段名由窗口类型名**去掉 `Window` 后缀**推导：
+//!   `MainWindow` → `Page::Main` / 字段 `main`（蛇形化）。
+//! - `windows!` 里**第一个登记的窗口是初始页**（当前为 `MainWindow`）。
+//! - 按键分发按声明顺序生成 match，**通配符按键（如 `KeyCode::Char(_)`）必须声明在
+//!   最后**——它会吞掉其后所有同路径按键，顺序错误已做编译期强制校验。
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
@@ -77,6 +85,20 @@ fn is_wildcard(spec: &TokenStream2) -> bool {
     spec.clone().into_iter().any(|tt| has_underscore(&tt))
 }
 
+/// 提取按键规格的变体名：`KeyCode::Char(_)` → `Char`（第一个括号分组前的最后一个 Ident）。
+/// 无分组（如 `KeyCode::Up`）返回该 Ident 本身，仅用于同名比较。
+fn variant_of(spec: &TokenStream2) -> Option<Ident> {
+    let mut last_ident = None;
+    for tt in spec.clone() {
+        match tt {
+            TokenTree::Ident(i) => last_ident = Some(i),
+            TokenTree::Group(_) => break,
+            _ => {}
+        }
+    }
+    last_ident
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +118,22 @@ mod tests {
         assert!(is_wildcard(&tokens), "tokens: {dbg:?}");
         let tokens2: TokenStream2 = parse_key("KeyCode::Char('q')");
         assert!(!is_wildcard(&tokens2));
+    }
+
+    #[test]
+    fn variant_extraction() {
+        assert_eq!(
+            variant_of(&parse_key("KeyCode::Char(_)")).map(|i| i.to_string()),
+            Some("Char".to_string())
+        );
+        assert_eq!(
+            variant_of(&parse_key("KeyCode::F(1)")).map(|i| i.to_string()),
+            Some("F".to_string())
+        );
+        assert_eq!(
+            variant_of(&parse_key("KeyCode::Up")).map(|i| i.to_string()),
+            Some("Up".to_string())
+        );
     }
 }
 
@@ -145,11 +183,14 @@ struct KeyEntry {
 /// 窗口固有方法约定（在 `#[window]` impl 内书写）：
 /// - `pub fn new(manager: &Manager) -> Self`
 /// - `pub fn on_open(&mut self)`
-/// - `pub fn draw(&mut self, manager: &mut Manager, f: &mut Frame)`
+/// - `pub fn draw(&mut self, manager: &Manager, f: &mut Frame)`
 ///
 /// 按键处理器签名约定：
-/// - 普通按键：`fn(&mut self, manager: &mut Manager) -> Option<Page>`
-/// - 通配符按键（如 `#[key(KeyCode::Char(_))]`，需要原始按键）：`fn(&mut self, manager: &mut Manager, key: KeyEvent) -> Option<Page>`
+/// - 普通按键：`fn(&mut self, manager: &Manager) -> Option<Page>`
+/// - 通配符按键（如 `#[key(KeyCode::Char(_))]`，需要原始按键）：`fn(&mut self, manager: &Manager, key: KeyEvent) -> Option<Page>`
+///
+/// **通配符按键必须声明在最后**（编译期强制）：match 按声明顺序匹配，
+/// 通配符会吞掉其后所有同路径的具体按键。
 #[proc_macro_attribute]
 pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
     let original = parse_macro_input!(item as ItemImpl);
@@ -213,7 +254,7 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
     if draw.is_none() {
         errors.push(Error::new(
             imp.span(),
-            "#[window] 窗口缺少 `pub fn draw(&mut self, manager: &mut Manager, f: &mut Frame)`",
+            "#[window] 窗口缺少 `pub fn draw(&mut self, manager: &Manager, f: &mut Frame)`",
         ));
     }
 
@@ -255,9 +296,9 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
         let expected = if wildcard { 3 } else { 2 };
         if sig.inputs.len() != expected {
             let hint = if wildcard {
-                "签名：`fn(&mut self, manager: &mut Manager, key: KeyEvent) -> Option<Page>`"
+                "签名：`fn(&mut self, manager: &Manager, key: KeyEvent) -> Option<Page>`"
             } else {
-                "签名：`fn(&mut self, manager: &mut Manager) -> Option<Page>`"
+                "签名：`fn(&mut self, manager: &Manager) -> Option<Page>`"
             };
             errors.push(Error::new(
                 sig.span(),
@@ -292,6 +333,28 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
             footer: key_attr.footer,
             wildcard,
         });
+    }
+
+    // 通配符按键（如 `KeyCode::Char(_)`）在 match 中会吞掉其后**同变体**的具体按键
+    // （如 `KeyCode::Char('q')`），必须声明在其之前；顺序错误编译期报错，
+    // 防止新增具体按键后静默失效。
+    for (i, e) in entries.iter().enumerate() {
+        if !e.wildcard {
+            continue;
+        }
+        let variant = variant_of(&e.spec);
+        let Some(variant) = variant else { continue };
+        if let Some(shadowed) = entries[i + 1..].iter().find(|later| {
+            !later.wildcard && variant_of(&later.spec).is_some_and(|v| v == variant)
+        }) {
+            errors.push(Error::new(
+                shadowed.ident.span(),
+                format!(
+                    "具体按键 `{}` 被其后的通配符 `{}` 吞掉：通配符必须声明在同变体具体按键之后",
+                    shadowed.spec, e.spec
+                ),
+            ));
+        }
     }
 
     if !errors.is_empty() {
@@ -370,7 +433,7 @@ pub fn window(attr: TokenStream, item: TokenStream) -> TokenStream {
             /// 按键分发（由 #[window] 生成）：声明顺序即匹配优先级，通配符请放在最后。
             fn handle_key(
                 &mut self,
-                app: &mut crate::manager::Manager,
+                app: &crate::manager::Manager,
                 key: crossterm::event::KeyEvent,
             ) -> Option<crate::tui::Page> {
                 match key.code {
@@ -448,11 +511,14 @@ fn to_snake_case(s: &str) -> String {
     out
 }
 
-/// 注册表宏：在 `ui/windows/mod.rs` 调用一次，展开生成
+/// 注册表宏：在 `tui/windows/mod.rs` 调用一次，展开生成
 /// `Page` 枚举、`Windows` 结构体、导航/绘制分发与 `BINDINGS` 聚合。
 ///
 /// 弹窗属性（`popup over`）声明在各窗口的 `#[window]` 上，
 /// 绘制叠加顺序通过 `Window::meta` 运行时读取。
+///
+/// 注意：**第一个登记的窗口是初始页**（当前为 `MainWindow`）；
+/// `Page` 变体名与字段名由类型名去掉 `Window` 后缀推导，改名结构体即改名页面身份。
 #[proc_macro]
 pub fn windows(input: TokenStream) -> TokenStream {
     let list = parse_macro_input!(input as WindowList);
@@ -556,7 +622,7 @@ pub fn windows(input: TokenStream) -> TokenStream {
             }
 
             /// 按键分发：窗口返回 `Some(page)` 表示请求导航
-            pub fn handle_key(&mut self, app: &mut crate::manager::Manager, key: crossterm::event::KeyEvent) {
+            pub fn handle_key(&mut self, app: &crate::manager::Manager, key: crossterm::event::KeyEvent) {
                 let nav = match self.current {
                     #(#handle_arms,)*
                 };
@@ -566,14 +632,14 @@ pub fn windows(input: TokenStream) -> TokenStream {
             }
 
             /// 绘制某页：若该页是弹窗（`Window::meta` 声明了父页面），先递归画父页面再叠加自己
-            fn draw_page(&mut self, page: Page, app: &mut crate::manager::Manager, f: &mut ratatui::Frame) {
+            fn draw_page(&mut self, page: Page, app: &crate::manager::Manager, f: &mut ratatui::Frame) {
                 match page {
                     #(#draw_arms,)*
                 }
             }
 
             /// 绘制当前页
-            pub fn draw(&mut self, app: &mut crate::manager::Manager, f: &mut ratatui::Frame) {
+            pub fn draw(&mut self, app: &crate::manager::Manager, f: &mut ratatui::Frame) {
                 self.draw_page(self.current, app, f);
             }
         }

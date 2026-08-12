@@ -34,12 +34,18 @@ fn body_style(t: &LogType) -> Style {
 
 pub struct OperationLog {
     scroller: Scroller,
+    /// 折行后的显示行（update 生成，render 只读）
+    rows: Vec<(LogType, String)>,
+    /// 可见高度（update 记录，翻页用）
+    visible: usize,
 }
 
 impl OperationLog {
     pub fn new() -> Self {
         Self {
             scroller: Scroller::new(),
+            rows: vec![],
+            visible: 1,
         }
     }
 
@@ -51,12 +57,20 @@ impl OperationLog {
         self.scroller.down(total);
     }
 
-    pub fn page_up(&mut self, visible: usize) {
-        self.scroller.page_up(visible);
+    pub fn page_up(&mut self) {
+        self.scroller.page_up(self.visible);
     }
 
-    pub fn page_down(&mut self, total: usize, visible: usize) {
-        self.scroller.page_down(total, visible);
+    pub fn page_down(&mut self, total: usize) {
+        self.scroller.page_down(total, self.visible);
+    }
+
+    /// 每帧渲染前调用：按当前宽度折行并收敛滚动位置。
+    /// 状态副作用集中在此，`render` 保持只读（渲染不得改状态）。
+    pub fn update(&mut self, logs: &OperationLogs, width: usize, height: usize) {
+        self.rows = Self::rows(logs, width);
+        self.visible = height.max(1);
+        self.scroller.clamp(self.rows.len());
     }
 
     /// 日志行展平为 (类型, 显示行)：每条日志按宽度折行，标签逐行重复
@@ -71,17 +85,10 @@ impl OperationLog {
         rows
     }
 
-    pub fn render(
-        &mut self,
-        logs: &OperationLogs,
-        width: usize,
-        height: usize,
-        focused: bool,
-    ) -> Paragraph<'static> {
-        let rows = Self::rows(logs, width);
-        self.scroller.clamp(rows.len());
-        let visible = height.max(1);
-        let (start, end) = self.scroller.viewport(rows.len(), visible);
+    /// 只读渲染：行数据与滚动位置由 `update` 提供
+    pub fn render(&self, focused: bool) -> Paragraph<'static> {
+        let rows = &self.rows;
+        let (start, end) = self.scroller.viewport(rows.len(), self.visible);
 
         let lines: Vec<Line> = rows
             .iter()

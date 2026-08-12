@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Serialize, Deserialize)]
+/// 缺字段时回落到 `Default`（即 `default_config()`），旧版本/手写精简配置不会解析失败。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MihomoConfig {
     pub port: u16,
     #[serde(rename = "socks-port")]
@@ -42,7 +44,8 @@ pub struct MihomoConfig {
 
 const GEO_MIRROR: &str = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GeoXUrl {
     pub geoip: String,
     pub geosite: String,
@@ -59,13 +62,13 @@ impl Default for GeoXUrl {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClashForAndroid {
     #[serde(rename = "append-system-dns")]
     pub append_system_dns: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sniffer {
     pub sniff: SniffConfig,
     pub enable: bool,
@@ -81,20 +84,21 @@ pub struct Sniffer {
     pub override_destination: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SniffConfig {
     pub tls: PortConfig,
     pub http: PortConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortConfig {
     pub ports: Vec<String>,
     #[serde(rename = "override-destination")]
     pub override_destination: bool,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Tun {
     pub enable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,7 +152,8 @@ impl Tun {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Dns {
     pub enable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,7 +233,7 @@ impl Dns {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyGroup {
     pub name: String,
     #[serde(rename = "type")]
@@ -238,7 +243,7 @@ pub struct ProxyGroup {
     pub use_list: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyProvider {
     #[serde(rename = "type")]
     pub provider_type: String,
@@ -327,26 +332,23 @@ impl MihomoConfig {
             .and_then(|p| p.get_index_of(key))
     }
 
-    pub fn prepare_switch_provider(
-        &mut self,
-        name: &str,
-        config_path: &PathBuf,
-    ) -> Result<(), Error> {
+    pub fn prepare_switch_provider(&mut self, name: &str) -> Result<(), Error> {
         let exists = self
             .proxy_providers
             .as_ref()
             .map(|providers| providers.contains_key(name))
             .unwrap_or(false);
         if !exists {
-            return Err(Error::Config(format!("代理商 '{}' 不存在", name)));
+            return Err(Error::Config(format!("订阅 '{}' 不存在", name)));
         }
         if let Some(group) = self.proxy_groups.first_mut() {
             group.use_list = vec![name.to_string()];
         }
-        self.write_to_path(config_path)
+        Ok(())
     }
 
-    pub fn set_tun_enabled(&mut self, enabled: bool, config_path: &PathBuf) -> Result<(), Error> {
+    /// 仅改内存；落盘由调用方负责（`save_config`，锁外写盘）
+    pub fn set_tun_enabled(&mut self, enabled: bool) {
         if enabled {
             let tun = self.tun.get_or_insert_with(Tun::default_enabled);
             tun.enable = true;
@@ -354,15 +356,20 @@ impl MihomoConfig {
         } else if let Some(t) = self.tun.as_mut() {
             t.enable = false;
         }
-        self.write_to_path(config_path)
     }
 
-    pub fn insert_sub(
-        &mut self,
-        url: String,
-        mut sub_name: String,
-        config_path: &PathBuf,
-    ) -> Result<(), Error> {
+    /// 仅改内存；落盘由调用方负责（`save_config`，锁外写盘）。
+    /// 与 `set_tun_enabled` 共用同一份默认 DNS 配置，避免两处实现分叉。
+    pub fn set_dns_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.dns.get_or_insert_with(Dns::default_enabled).enable = true;
+        } else if let Some(d) = self.dns.as_mut() {
+            d.enable = false;
+        }
+    }
+
+    /// 仅改内存（重名自动追加序号）；落盘由调用方负责
+    pub fn insert_sub(&mut self, url: String, mut sub_name: String) {
         if self.proxy_providers.is_none() {
             self.proxy_providers = Some(IndexMap::new());
         }
@@ -392,7 +399,6 @@ impl MihomoConfig {
                 },
             );
         }
-        self.write_to_path(config_path)
     }
 
     pub fn from_yaml(yaml_str: &str) -> Result<Self, Error> {
@@ -419,5 +425,87 @@ impl MihomoConfig {
         fs::write(config_path, yaml_str)
             .map_err(|e| Error::Config(format!("写入文件失败: {e}")))?;
         Ok(())
+    }
+}
+
+/// `#[serde(default)]` 的回落：缺字段时取 `default_config()` 的完整默认值
+impl Default for MihomoConfig {
+    fn default() -> Self {
+        Self::default_config()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_yaml_roundtrip() {
+        let config = MihomoConfig::default_config();
+        let yaml = config.to_yaml().unwrap();
+        let config2 = MihomoConfig::from_yaml(&yaml).unwrap();
+        assert_eq!(config.port, config2.port);
+        assert_eq!(config.socks_port, config2.socks_port);
+        assert_eq!(config.proxy_groups.len(), config2.proxy_groups.len());
+        assert_eq!(config.rules.len(), config2.rules.len());
+        assert_eq!(config.sniffer.enable, config2.sniffer.enable);
+        assert_eq!(config.geox_url.geosite, config2.geox_url.geosite);
+        assert_eq!(config.geox_url.geoip, config2.geox_url.geoip);
+        assert_eq!(config.geox_url.mmdb, config2.geox_url.mmdb);
+    }
+
+    #[test]
+    fn test_invalid_yaml() {
+        let err = MihomoConfig::from_yaml("invalid: yaml: content: [").unwrap_err();
+        assert!(err.to_string().contains("解析YAML失败"));
+    }
+
+    #[test]
+    fn test_geo_url_auto_fill() {
+        let config = MihomoConfig::from_yaml(
+            "port: 7890\nsocks-port: 7891\nallow-lan: true\nmode: Rule\nlog-level: info\nexternal-controller: :9090\nunified-delay: true\nkeep-alive-interval: 360\nclash-for-android:\n  append-system-dns: false\nsniffer:\n  enable: true\n  force-domain: []\n  skip-domain: []\n  parse-pure-ip: true\n  force-dns-mapping: true\n  override-destination: true\n  sniff:\n    tls:\n      ports: []\n      override-destination: true\n    http:\n      ports: []\n      override-destination: true\nproxy-groups: []\nrules: []\n",
+        )
+        .unwrap();
+        assert!(config.geox_url.geosite.contains("jsdelivr.net"));
+        assert!(config.geox_url.geoip.contains("jsdelivr.net"));
+        assert!(config.geox_url.mmdb.contains("jsdelivr.net"));
+        let yaml = config.to_yaml().unwrap();
+        assert!(yaml.contains("geox-url:"));
+        assert!(yaml.contains("geosite:"));
+    }
+
+    #[test]
+    fn test_partial_config_yaml_uses_defaults() {
+        // P0 回归：缺字段的 config.yaml 不应解析失败；缺失字段取 default_config 的值
+        let config = MihomoConfig::from_yaml("port: 1234\n").unwrap();
+        assert_eq!(config.port, 1234);
+        assert_eq!(config.socks_port, MihomoConfig::default_config().socks_port);
+        assert_eq!(config.mode, "Rule");
+        assert!(!config.rules.is_empty());
+        assert!(config.tun.is_none());
+    }
+
+    #[test]
+    fn test_insert_sub_dedup() {
+        let mut config = MihomoConfig::default_config();
+        config.insert_sub("https://example.com/sub".to_string(), "订阅".to_string());
+        config.insert_sub("https://example.com/sub".to_string(), "订阅".to_string());
+        let names: Vec<String> = config
+            .proxy_providers
+            .as_ref()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(names, vec!["订阅".to_string(), "订阅 (1)".to_string()]);
+    }
+
+    #[test]
+    fn test_group_name_fallback() {
+        let config = MihomoConfig::default_config();
+        assert_eq!(config.group_name(), "Proxy");
+        let mut config2 = MihomoConfig::default_config();
+        config2.proxy_groups.clear();
+        assert_eq!(config2.group_name(), "Proxy");
     }
 }

@@ -27,12 +27,12 @@
 | **代理**　  | **PUT**  | **`/proxies/{name}`**　　　　　　　　　　　　　　　　　　　　  | **选择代理** Body `{"name":"日本"}`　　　　　　　　　　　　 |           |         | 　　　　　　　　　　　　　　 |
 | 代理　　　  | DELETE　 | `/proxies/{name}`　　　　　　　　　　　　　　　　　　　　　　  | 清除 fixed 选择（Selector 除外）　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
 | 代理　　　  | GET　　  | `/proxies/{name}/delay?url=&timeout=5000`　　　　　　　　　　  | 单节点测速 `?expected=`　　　　　　　　　　　　　　　　　　 |           |         | 　　　　　　　　　　　　　　 |
-| 代理商集合  | GET　　  | `/providers/proxies`　　　　　　　　　　　　　　　　　　　　　 | 所有代理商　　　　　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
-| 代理商　　  | GET　　  | `/providers/proxies/{name}`　　　　　　　　　　　　　　　　　  | 某代理商信息　　　　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
-| **代理商**  | **PUT**  | **`/providers/proxies/{name}`**　　　　　　　　　　　　　　　  | **更新/重新拉取该代理商**　　　　　　　　　　　　　　　　　 |           |         | 　　　　　　　　　　　　　　 |
-| 代理商　　  | GET　　  | `/providers/proxies/{name}/healthcheck`　　　　　　　　　　　  | 触发该代理商健康检查　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
-| 代理商　　  | GET　　  | `/providers/proxies/{name}/{proxy}`　　　　　　　　　　　　　  | 代理商内某节点信息　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
-| 代理商　　  | GET　　  | `/providers/proxies/{name}/{proxy}/healthcheck?url=&timeout=`  | 代理商内单节点测速　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
+| 订阅集合　　| GET　　  | `/providers/proxies`　　　　　　　　　　　　　　　　　　　　　 | 所有订阅　　　　　　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
+| 订阅　　　  | GET　　  | `/providers/proxies/{name}`　　　　　　　　　　　　　　　　　  | 某订阅信息　　　　　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
+| **订阅**　  | **PUT**  | **`/providers/proxies/{name}`**　　　　　　　　　　　　　　　  | **更新/重新拉取该订阅**　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
+| 订阅　　　  | GET　　  | `/providers/proxies/{name}/healthcheck`　　　　　　　　　　　  | 触发该订阅健康检查　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
+| 订阅　　　  | GET　　  | `/providers/proxies/{name}/{proxy}`　　　　　　　　　　　　　  | 订阅内某节点信息　　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
+| 订阅　　　  | GET　　  | `/providers/proxies/{name}/{proxy}/healthcheck?url=&timeout=`  | 订阅内单节点测速　　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
 | 规则　　　  | GET　　  | `/rules`　　　　　　　　　　　　　　　　　　　　　　　　　　　 | 所有规则　　　　　　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
 | 规则　　　  | PATCH　  | `/rules/disable`　　　　　　　　　　　　　　　　　　　　　　　 | 临时禁用规则 `{"0":false,"1":true}`　　　　　　　　　　　　 |           |         | 　　　　　　　　　　　　　　 |
 | 规则集合　  | GET　　  | `/providers/rules`　　　　　　　　　　　　　　　　　　　　　　 | 所有规则集合　　　　　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
@@ -47,7 +47,7 @@
 | DEBUG　　　 | PUT　　  | `/debug/gc`　　　　　　　　　　　　　　　　　　　　　　　　　  | 主动 GC（需 debug 级别）　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
 | DEBUG　　　 | GET　　  | `/debug/pprof`　　　　　　　　　　　　　　　　　　　　　　　　 | pprof（heap/allocs）　　　　　　　　　　　　　　　　　　　  |           |         | 　　　　　　　　　　　　　　 |
 
-## 热切换代理商关键接口
+## 热切换订阅关键接口
 
 `PUT /configs?force=true`（重载配置，进程不死、端口不断）：
 

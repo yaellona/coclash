@@ -1,19 +1,34 @@
-﻿use crate::core::mihomo::MihomoStatus;
-use crate::core::config::mihomo_config::MihomoConfig;
-use crate::core::config::node::Node;
+﻿use crate::core::config::mihomo_config::MihomoConfig;
+use crate::core::mihomo::MihomoStatus;
 use crate::operation_log::OperationLogs;
+use serde::{Deserialize, Serialize};
 
-/// 鍏ㄥ眬鍞竴鏁版嵁婧愶細UI 鍙娓叉煋锛屼换鍔＄粨鏋滅粡浠诲姟灞?`TaskEvent::apply` 鏇存柊銆?
+/// 节点列表展示模型（AppState.nodes）：UI 层数据，不属于内核配置
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Node {
+    pub name: String,
+    pub speed: String,
+}
+
+impl Node {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            speed: "-".to_string(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub nodes: Vec<Node>,
-    /// 鑺傜偣鍒楄〃鍏夋爣浣嶇疆
     pub select: usize,
-    /// 褰撳墠閫変腑锛堢敓鏁堬級鐨勪唬鐞嗚妭鐐逛笅鏍?
     pub active_node: Option<usize>,
     pub mihomo_status: MihomoStatus,
     pub proxy_running: bool,
     pub is_test_delay: bool,
+    /// 切换节点任务进行中（连按 Enter 时拒绝新任务，见 task.rs）
+    pub is_switching_node: bool,
     pub logs: OperationLogs,
     pub config: MihomoConfig,
 }
@@ -22,8 +37,17 @@ impl AppState {
     pub fn tun_enabled(&self) -> bool {
         self.config.tun.as_ref().is_some_and(|t| t.enable)
     }
-
-    /// 浠ｇ悊鐩戝惉鍦板潃锛堜互 config.yaml 绔彛涓哄噯锛?
+    pub fn dns_enabled(&self) -> bool {
+        self.config.dns.as_ref().is_some_and(|d| d.enable)
+    }
+    /// 节点光标移动（环绕）。UI 状态修改的唯一入口，禁止窗口直接字段赋值。
+    pub fn navigate(&mut self, step: i32) {
+        let len = self.nodes.len();
+        if len == 0 {
+            return;
+        }
+        self.select = (self.select as i32 + step).rem_euclid(len as i32) as usize;
+    }
     pub fn proxy_addr(&self) -> String {
         format!("127.0.0.1:{}", self.config.port)
     }

@@ -1,8 +1,8 @@
-//! 选择代理商窗口。
+//! 选择订阅窗口。
 use crate::core::config::mihomo_config::MihomoConfig;
 use crate::manager::Manager;
 use crate::tui::Page;
-use crate::tui::layout::popup_rect;
+use crate::tui::layout::{popup_rect, wrap_index};
 use crate::window;
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -19,7 +19,7 @@ pub struct ProviderSelectWindow {
 impl ProviderSelectWindow {
     pub fn new(manager: &Manager) -> Self {
         Self {
-            select: initial_select(&manager.state.config),
+            select: initial_select(&manager.state_lock().config),
         }
     }
 
@@ -27,7 +27,7 @@ impl ProviderSelectWindow {
 
     fn provider_count(&self, manager: &Manager) -> usize {
         manager
-            .state
+            .state_lock()
             .config
             .proxy_providers
             .as_ref()
@@ -40,73 +40,75 @@ impl ProviderSelectWindow {
         if len == 0 {
             return;
         }
-        self.select = (self.select as i32 + step).rem_euclid(len as i32) as usize;
+        self.select = wrap_index(self.select, len, step);
     }
 
-    fn delete_current(&mut self, manager: &mut Manager) {
-        let name = match manager.state.config.provider_key_by_index(self.select) {
+    fn delete_current(&mut self, manager: &Manager) {
+        let name = match manager.state_lock().config.provider_key_by_index(self.select) {
             Some(n) => n,
             None => return,
         };
-        if let Some(providers) = manager.state.config.proxy_providers.as_mut() {
-            providers.shift_remove(&name);
-        }
-        match manager.state.config.write_to_path(&manager.config_path) {
+        manager.edit_config(|c| {
+            if let Some(providers) = c.proxy_providers.as_mut() {
+                providers.shift_remove(&name);
+            }
+        });
+        match manager.save_config() {
             Ok(()) => manager.reload_config(),
             Err(e) => manager.log_err(e),
         }
     }
 
     #[key(KeyCode::Esc, "取消", footer = false)]
-    fn cancel(&mut self, _manager: &mut Manager) -> Option<Page> {
+    fn cancel(&mut self, _manager: &Manager) -> Option<Page> {
         Some(Page::Main)
     }
 
     #[key(KeyCode::Up, "导航", footer = false)]
-    fn up(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn up(&mut self, manager: &Manager) -> Option<Page> {
         self.navigate(manager, -1);
         None
     }
 
     #[key(KeyCode::Down, "导航", footer = false)]
-    fn down(&mut self, manager: &mut Manager) -> Option<Page> {
+    fn down(&mut self, manager: &Manager) -> Option<Page> {
         self.navigate(manager, 1);
         None
     }
 
-    #[key(KeyCode::Char('d'), "删除代理", footer = false)]
-    fn remove_provider(&mut self, manager: &mut Manager) -> Option<Page> {
+    #[key(KeyCode::Char('d'), "删除订阅", footer = false)]
+    fn remove_provider(&mut self, manager: &Manager) -> Option<Page> {
         self.delete_current(manager);
         None
     }
 
     #[key(KeyCode::Enter, "确认", footer = false)]
-    fn confirm(&mut self, manager: &mut Manager) -> Option<Page> {
-        if let Some(name) = manager.state.config.provider_key_by_index(self.select) {
+    fn confirm(&mut self, manager: &Manager) -> Option<Page> {
+        let name = manager.state_lock().config.provider_key_by_index(self.select);
+        if let Some(name) = name {
             manager.switch_provider(name);
         }
         Some(Page::Main)
     }
 
-    pub fn draw(&mut self, manager: &mut Manager, f: &mut Frame) {
+    pub fn draw(&mut self, manager: &Manager, f: &mut Frame) {
         let area = popup_rect(f.area());
 
         // 清除背景
         f.render_widget(Clear, area);
 
         let block = Block::default()
-            .title("选择代理商")
-            .title_bottom("(Enter 确认, Esc 取消, d 删除代理)")
+            .title("选择订阅")
+            .title_bottom("(Enter 确认, Esc 取消, d 删除订阅)")
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::White));
 
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // 构建代理商列表
-        let items: Vec<String> = manager
-            .state
-            .config
+        // 构建订阅列表
+        let config = &manager.state_lock().config;
+        let items: Vec<String> = config
             .proxy_providers
             .as_ref()
             .map(|providers| {
@@ -131,7 +133,7 @@ impl ProviderSelectWindow {
     }
 }
 
-/// 从配置推导初始选中的代理商
+/// 从配置推导初始选中的订阅
 fn initial_select(config: &MihomoConfig) -> usize {
     let mut select = 0;
     if !config.proxy_groups.is_empty()
