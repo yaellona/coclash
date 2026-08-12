@@ -4,8 +4,6 @@
 
 支持系统代理与tun模式。
 
-在windows上应该基本可用，linux上需要自己修改环境变量，然后source。
-
 > 做这玩意的契机是，我主用的系统的nixos，不知道为什么会clash verge rev有时候会抽风，导入不了url，于是我打算自己玩mihomo内核。
 >
 > 但是发现自己解决不了linux的系统代理热切换。只能修改linux的系统代理，然后mihomo开了不关QWQ.
@@ -65,7 +63,7 @@ TUI 通过 mihomo 的 external-controller RESTful API 交互（拉取节点、�
 ## TODO
 
 1. ~~添加tun模式。~~
-2. 提供mihomo自动安装方案。
+2. 提供mihomo自动安装方案。(至少nixos实现了不是吗🤣)
 3. ~~打nix包。~~
 4. ~~静默启动。~~
 5. ~~mihomo的进程和tui解耦，关闭tui不关闭mihomo~~
