@@ -368,6 +368,16 @@ impl MihomoConfig {
         }
     }
 
+    /// 仅改内存（同步从策略组的 use 列表移除，组回落 DIRECT）；落盘由调用方负责
+    pub fn remove_provider(&mut self, name: &str) {
+        if let Some(providers) = self.proxy_providers.as_mut() {
+            providers.shift_remove(name);
+        }
+        for group in &mut self.proxy_groups {
+            group.use_list.retain(|n| n != name);
+        }
+    }
+
     /// 仅改内存（重名自动追加序号）；落盘由调用方负责
     pub fn insert_sub(&mut self, url: String, mut sub_name: String) {
         if self.proxy_providers.is_none() {

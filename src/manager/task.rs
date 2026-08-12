@@ -17,6 +17,7 @@ use crate::settings::Settings;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// 任务发起器：持有 api/设置/配置路径与共享状态，`Manager` 只做转发
 pub struct TaskRunner {
@@ -128,41 +129,31 @@ impl TaskRunner {
         let api = self.api.clone();
         let path = self.config_path.clone();
         let state = self.state.clone();
+        let retry = self.settings.provider_retry.max(1);
+        let interval = self.settings.provider_retry_interval();
         self.spawn(async move {
-            reload_config_impl(&api, &state, &path).await;
+            reload_config_impl(&api, &state, &path, retry, interval).await;
         });
     }
 
-    /// 添加订阅：验证 URL → 命名（失败兜底）→ 锁内插入 → 锁外写盘 → 重载
+    /// 添加订阅：锁内按「订阅{n}」命名 → 锁内插入 → 锁外写盘 → 重载
     pub fn insert_sub(&self, url: String) {
         let api = self.api.clone();
         let state = self.state.clone();
-        let fetch_url = url.clone();
         let config_path = self.config_path.clone();
+        let retry = self.settings.provider_retry.max(1);
+        let interval = self.settings.provider_retry_interval();
         self.spawn(async move {
-            {
-                // 预置
-                let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
-                st.logs.add_log(LogType::Info, "正在验证URL...".into());
-            }
-            let result = api.get_provider_name(&fetch_url).await;
-            // 命名：失败时用"订阅{n}"兜底
-            let name = match result {
-                Ok(name) => name,
-                Err(e) => {
-                    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
-                    let n = st
-                        .config
-                        .proxy_providers
-                        .as_ref()
-                        .map(|p| p.len())
-                        .unwrap_or(0)
-                        + 1;
-                    let fallback = format!("订阅{n}");
-                    st.logs
-                        .add_log(LogType::Warn, format!("{e}，使用默认名称 {fallback}"));
-                    fallback
-                }
+            let name = {
+                let st = state.lock().unwrap_or_else(|e| e.into_inner());
+                let n = st
+                    .config
+                    .proxy_providers
+                    .as_ref()
+                    .map(|p| p.len())
+                    .unwrap_or(0)
+                    + 1;
+                format!("订阅{n}")
             };
             // 回灌：锁内纯内存插入
             {
@@ -177,7 +168,7 @@ impl TaskRunner {
                         .unwrap_or_else(|e| e.into_inner())
                         .logs
                         .add_log(LogType::Info, format!("插入订阅：{name}"));
-                    reload_config_impl(&api, &state, &config_path).await;
+                    reload_config_impl(&api, &state, &config_path, retry, interval).await;
                 }
                 Err(e) => state
                     .lock()
@@ -255,8 +246,15 @@ async fn load_nodes_impl(api: &ApiClient, state: &Arc<Mutex<AppState>>) {
     }
 }
 
-/// 重载配置，成功后续发拉取节点
-async fn reload_config_impl(api: &ApiClient, state: &Arc<Mutex<AppState>>, path: &Path) {
+/// 重载配置并刷新显示列表。provider 由 mihomo 后台异步拉取，
+/// 无论 reload 成败都先刷新一次，再轮询直到节点不再只有 DIRECT 兜底。
+async fn reload_config_impl(
+    api: &ApiClient,
+    state: &Arc<Mutex<AppState>>,
+    path: &Path,
+    retry: u32,
+    interval: Duration,
+) {
     match api.reload_config(path).await {
         Ok(()) => {
             state
@@ -264,13 +262,27 @@ async fn reload_config_impl(api: &ApiClient, state: &Arc<Mutex<AppState>>, path:
                 .unwrap_or_else(|e| e.into_inner())
                 .logs
                 .add_log(LogType::Info, "重置配置成功".into());
-            load_nodes_impl(api, state).await;
         }
-        Err(e) => state
+        Err(e) => {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .logs
+                .add_log(LogType::Error, e.to_string());
+        }
+    }
+    for _ in 0..retry {
+        load_nodes_impl(api, state).await;
+        let populated = state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .logs
-            .add_log(LogType::Error, e.to_string()),
+            .nodes
+            .len()
+            > 1;
+        if populated {
+            break;
+        }
+        tokio::time::sleep(interval).await;
     }
 }
 

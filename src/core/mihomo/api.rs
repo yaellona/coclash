@@ -1,5 +1,5 @@
 //! mihomo RESTful API 客户端：单一共享 client，逐调用设置超时。
-use crate::constants::{DEFAULT_GROUP, SUBSCRIPTION_UA};
+use crate::constants::DEFAULT_GROUP;
 use crate::error::Error;
 use crate::settings::Settings;
 use serde::Deserialize;
@@ -127,80 +127,4 @@ impl ApiClient {
         }
         Ok(())
     }
-
-    /// 用 flclash 的方式获取订阅名称（content-disposition 或域名兜底）
-    pub async fn get_provider_name(&self, url: &str) -> Result<String, Error> {
-        let domain = url::Url::parse(url)
-            .ok()
-            .and_then(|u| u.host_str().map(|s| s.to_string()));
-        let resp = self
-            .client
-            .get(url)
-            .timeout(self.delay_http_timeout)
-            .header("User-Agent", SUBSCRIPTION_UA)
-            .send()
-            .await;
-        let cd = match &resp {
-            Ok(resp) => resp
-                .headers()
-                .get("content-disposition")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or(""),
-            Err(e) => {
-                if let Some(d) = domain {
-                    return Ok(d);
-                }
-                return Err(Error::Api(format!("请求失败: {e}")));
-            }
-        };
-        if let Some(name) = parse_content_disposition(cd) {
-            return Ok(name);
-        }
-        if let Some(d) = domain {
-            return Ok(d);
-        }
-        Err(Error::Api("无法解析订阅名称".to_string()))
-    }
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("xx"),
-                16,
-            )
-        {
-            result.push(byte);
-            i += 3;
-            continue;
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(result).unwrap_or_default()
-}
-
-fn parse_content_disposition(cd: &str) -> Option<String> {
-    for part in cd.split(';') {
-        let p = part.trim();
-        if p.to_lowercase().starts_with("filename*=") {
-            let val = &p[10..];
-            let segs: Vec<&str> = val.split('\'').collect();
-            let encoded = if segs.len() >= 3 { segs[2] } else { val };
-            return Some(percent_decode(encoded));
-        }
-    }
-    for part in cd.split(';') {
-        let p = part.trim();
-        if p.to_lowercase().starts_with("filename=") {
-            let val = &p[9..];
-            return Some(val.trim_matches('"').trim_matches('\'').to_string());
-        }
-    }
-    None
 }

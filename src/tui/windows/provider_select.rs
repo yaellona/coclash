@@ -44,15 +44,15 @@ impl ProviderSelectWindow {
     }
 
     fn delete_current(&mut self, manager: &Manager) {
+        let len = self.provider_count(manager);
         let name = match manager.state_lock().config.provider_key_by_index(self.select) {
             Some(n) => n,
             None => return,
         };
-        manager.edit_config(|c| {
-            if let Some(providers) = c.proxy_providers.as_mut() {
-                providers.shift_remove(&name);
-            }
-        });
+        manager.edit_config(|c| c.remove_provider(&name));
+        if len > 0 {
+            self.select = self.select.min(len - 1);
+        }
         match manager.save_config() {
             Ok(()) => manager.reload_config(),
             Err(e) => manager.log_err(e),

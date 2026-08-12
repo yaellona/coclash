@@ -1,14 +1,17 @@
-//! mihomo 进程管理：pidfile、端口/状态探测、启动/停止。
+//! mihomo 进程管理：进程表扫描、端口/状态探测、启动/停止。
 //!
 //! 平台差异收敛在 `platform` 子模块（`windows`/`unix` 二选一，见各文件顶部文档）：
-//! 各平台只实现「探测与启动/终止」的最小差异，公共流程（pidfile、状态判定、
+//! 各平台只实现「探测与启动/终止」的最小差异，公共流程（进程表扫描、状态判定、
 //! 日志重定向、SIGTERM→SIGKILL 语义）保持在本模块，双平台行为一致。
-use crate::constants::{MIHOMO_LOG_FILE, PID_FILE};
+//!
+//! 运行状态判定不依赖任何文件记录：通过扫描系统进程表找出命令行含本程序
+//! `config_dir` 的 mihomo 进程，即为 RunningByUs；仅端口可达则为 External。
+use crate::constants::MIHOMO_LOG_FILE;
 use crate::error::Error;
 use crate::settings::Settings;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -30,42 +33,10 @@ use unix as platform;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MihomoStatus {
     Stopped,
-    /// 由本程序启动，记录 PID
+    /// 运行中且命令行包含本程序 config_dir（判定方式：进程表扫描，无文件记录）
     RunningByUs(u32),
-    /// 端口被占用但无 PID 记录（外部启动的实例）
+    /// 端口被占用但未找到匹配本 config_dir 的 mihomo 进程（外部启动的实例）
     External,
-}
-
-// ===== pidfile =====
-
-/// 供平台子模块写入（Windows 提权标记格式 `{pid}:1`）
-pub(super) fn pidfile_path(config_dir: &Path) -> PathBuf {
-    config_dir.join(PID_FILE)
-}
-
-pub(crate) fn save_pid(config_dir: &Path, pid: u32) -> Result<(), Error> {
-    fs::write(pidfile_path(config_dir), pid.to_string())
-        .map_err(|e| Error::Process(format!("写入 PID 文件失败: {e}")))
-}
-
-pub(crate) fn load_pidfile(config_dir: &Path) -> Option<u32> {
-    load_pidfile_elevated(config_dir).map(|(pid, _)| pid)
-}
-
-/// 兼容旧格式纯数字 pidfile；返回 (pid, 是否提权)
-pub(crate) fn load_pidfile_elevated(config_dir: &Path) -> Option<(u32, bool)> {
-    let content = fs::read_to_string(pidfile_path(config_dir)).ok()?;
-    let content = content.trim();
-    if let Some((pid, flag)) = content.split_once(':') {
-        let pid: u32 = pid.trim().parse().ok()?;
-        return Some((pid, flag.trim() == "1"));
-    }
-    let pid: u32 = content.parse().ok()?;
-    Some((pid, false))
-}
-
-pub(crate) fn clear_pidfile(config_dir: &Path) {
-    let _ = fs::remove_file(pidfile_path(config_dir));
 }
 
 // ===== 端口 / 进程探测 =====
@@ -99,19 +70,12 @@ pub fn is_pid_alive(pid: u32) -> bool {
     platform::is_pid_alive(pid)
 }
 
-/// PID 存活且确实是本程序启动的那个 mihomo（防止 pidfile 过期后 PID 被复用误杀）
-fn is_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path, pid: u32) -> bool {
-    is_pid_alive(pid) && platform::is_mihomo_pid(binary, config_dir, pid)
-}
-
-/// 综合端口与 PID 记录判断当前状态，同时清理过期的 pidfile
+/// 扫描进程表判断当前状态：命令行含本程序 config_dir 的 mihomo 进程 → RunningByUs；
+/// 仅端口可达 → External；否则 Stopped。不依赖任何文件记录。
 pub fn detect_status(settings: &Settings, config_dir: &Path) -> MihomoStatus {
     let binary = resolve_mihomo_exe(settings);
-    if let Some(pid) = load_pidfile(config_dir) {
-        if is_mihomo_pid(&binary, config_dir, pid) {
-            return MihomoStatus::RunningByUs(pid);
-        }
-        clear_pidfile(config_dir);
+    if let Some(pid) = platform::find_mihomo_pid(&binary, config_dir) {
+        return MihomoStatus::RunningByUs(pid);
     }
     if is_port_up(settings) {
         MihomoStatus::External
@@ -147,7 +111,6 @@ pub fn start_mihomo(
     }
 
     let pid = spawn_detached(&binary, config_dir)?;
-    save_pid(config_dir, pid)?;
     Ok((pid, binary))
 }
 
@@ -181,31 +144,21 @@ fn spawn_detached(binary: &ResolvedBinary, config_dir: &Path) -> Result<u32, Err
     Ok(child.id())
 }
 
-/// 只停止由本程序启动的 mihomo（依据 pidfile）；外部实例拒绝操作
+/// 只停止匹配本 config_dir 的 mihomo 进程（进程表扫描定位）；外部实例（命令行不含
+/// config_dir）拒绝操作
 pub fn stop_mihomo(settings: &Settings, config_dir: &Path) -> Result<(), Error> {
-    let (pid, elevated) = match load_pidfile_elevated(config_dir) {
-        Some(p) => p,
-        None => {
-            return Err(Error::Process(
-                "未找到由本程序启动的 mihomo（无 PID 记录）；若是外部启动的实例，请自行关闭"
-                    .to_string(),
-            ));
-        }
-    };
     let binary = resolve_mihomo_exe(settings);
-    if !is_mihomo_pid(&binary, config_dir, pid) {
-        clear_pidfile(config_dir);
-        return Err(Error::Process(format!(
-            "PID 记录 ({pid}) 已失效（进程不存在或不是 mihomo），已清除记录"
-        )));
-    }
-    kill_pid(pid, elevated)?;
-    clear_pidfile(config_dir);
-    Ok(())
+    let pid = platform::find_mihomo_pid(&binary, config_dir).ok_or_else(|| {
+        Error::Process(
+            "未找到运行中的 mihomo（进程不存在或不是本配置目录启动的）；若是外部启动的实例，请自行关闭"
+                .to_string(),
+        )
+    })?;
+    kill_pid(pid)
 }
 
-fn kill_pid(pid: u32, elevated: bool) -> Result<(), Error> {
-    platform::kill_pid(pid, elevated)
+fn kill_pid(pid: u32) -> Result<(), Error> {
+    platform::kill_pid(pid)
 }
 
 /// TUN 权限检查（仅 Unix；Windows 无此概念）
@@ -215,35 +168,6 @@ pub use unix::tun_capability_warning;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_pidfile_roundtrip() {
-        let dir = TempDir::new().unwrap();
-        save_pid(dir.path(), 12345).unwrap();
-        assert_eq!(load_pidfile(dir.path()), Some(12345));
-        clear_pidfile(dir.path());
-        assert_eq!(load_pidfile(dir.path()), None);
-    }
-
-    #[test]
-    fn test_pidfile_invalid_content() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(PID_FILE), "not-a-pid").unwrap();
-        assert_eq!(load_pidfile(dir.path()), None);
-    }
-
-    #[test]
-    fn test_pidfile_elevated_roundtrip() {
-        let dir = TempDir::new().unwrap();
-        save_pid(dir.path(), 12345).unwrap();
-        assert_eq!(load_pidfile(dir.path()), Some(12345));
-        assert_eq!(load_pidfile_elevated(dir.path()), Some((12345, false)));
-        std::fs::write(dir.path().join(PID_FILE), "12345:1").unwrap();
-        assert_eq!(load_pidfile_elevated(dir.path()), Some((12345, true)));
-        clear_pidfile(dir.path());
-        assert_eq!(load_pidfile_elevated(dir.path()), None);
-    }
 
     #[test]
     fn test_is_pid_alive() {

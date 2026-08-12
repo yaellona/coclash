@@ -1,9 +1,7 @@
 //! Windows 平台实现：UAC 提权启动（ShellExecuteExW）、taskkill/TerminateProcess 停止、
 //! PowerShell CIM / tasklist 进程信息探测。
 use super::super::binary::ResolvedBinary;
-use super::pidfile_path;
 use crate::error::Error;
-use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -104,12 +102,9 @@ fn spawn_mihomo_elevated(binary: &ResolvedBinary, config_dir: &Path) -> Result<u
     Ok(pid)
 }
 
-/// 提权启动 + 写入 `{pid}:1` 标记的 pidfile（供 `stop_mihomo` 识别）
+/// 提权启动；进程句柄缓存在本进程内（供停止时 TerminateProcess）
 pub(super) fn start_elevated(binary: &ResolvedBinary, config_dir: &Path) -> Result<u32, Error> {
-    let pid = spawn_mihomo_elevated(binary, config_dir)?;
-    fs::write(pidfile_path(config_dir), format!("{pid}:1"))
-        .map_err(|e| Error::Process(format!("写入 PID 文件失败: {e}")))?;
-    Ok(pid)
+    spawn_mihomo_elevated(binary, config_dir)
 }
 
 /// 分离会话：新进程组 + 无控制台（mihomo 持续在后台运行）
@@ -127,17 +122,57 @@ pub(super) fn is_pid_alive(pid: u32) -> bool {
     image_name(pid).is_some()
 }
 
-/// 判定依据：命令行包含 config_dir 为主（与 unix 语义一致，不依赖解析到的 mihomo 文件名，
-/// 避免不同解析结果互相误判为外部并清掉 pidfile）；镜像名比对为辅助兜底。
-pub(super) fn is_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path, pid: u32) -> bool {
-    if let Some((name, cmdline)) = process_info(pid) {
-        matches_mihomo_info(&name, &cmdline, binary, config_dir)
-    } else {
-        // CIM 查询失败时退回镜像名比对
-        image_name(pid)
-            .map(|img| img.eq_ignore_ascii_case(&mihomo_image_name(&binary.cmd)))
-            .unwrap_or(false)
+/// 扫描进程表：命令行含 config_dir 优先（与 unix 语义一致），镜像名比对为辅助兜底
+pub(super) fn find_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path) -> Option<u32> {
+    let processes = all_processes()?;
+    for p in processes {
+        if matches_mihomo_info(&p.name, &p.cmdline, binary, config_dir) {
+            return Some(p.pid);
+        }
     }
+    None
+}
+
+struct ProcessInfo {
+    pid: u32,
+    name: String,
+    cmdline: String,
+}
+
+/// 一次枚举全部进程（PowerShell 5.1 CIM）
+fn all_processes() -> Option<Vec<ProcessInfo>> {
+    let script = "Get-CimInstance Win32_Process | Select-Object -Property ProcessId,Name,CommandLine | ConvertTo-Json -Compress";
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // 单进程时 ConvertTo-Json 输出单个对象，多进程时为数组，统一包一层处理
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let arr = match &value {
+        serde_json::Value::Array(a) => a.clone(),
+        serde_json::Value::Object(_) => vec![value],
+        _ => return None,
+    };
+    Some(
+        arr.into_iter()
+            .filter_map(|v| {
+                let pid = v.get("ProcessId")?.as_u64()? as u32;
+                let name = v.get("Name")?.as_str()?.to_string();
+                let cmdline = v
+                    .get("CommandLine")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(ProcessInfo { pid, name, cmdline })
+            })
+            .collect(),
+    )
 }
 
 fn matches_mihomo_info(
@@ -150,31 +185,6 @@ fn matches_mihomo_info(
         Some(dir) if !dir.is_empty() && cmdline.contains(dir) => true,
         _ => name.eq_ignore_ascii_case(&mihomo_image_name(&binary.cmd)),
     }
-}
-
-/// 一次调用同时取进程镜像名与命令行（PowerShell 5.1 CIM）
-fn process_info(pid: u32) -> Option<(String, String)> {
-    let script = format!(
-        "Get-CimInstance Win32_Process -Filter 'ProcessId={pid}' | Select-Object -Property Name,CommandLine | ConvertTo-Json -Compress"
-    );
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
-    let name = value.get("Name")?.as_str()?.to_string();
-    let cmdline = value
-        .get("CommandLine")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    Some((name, cmdline))
 }
 
 fn image_name(pid: u32) -> Option<String> {
@@ -218,20 +228,27 @@ fn kill_pid_via_runas(pid: u32) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn kill_pid(pid: u32, elevated: bool) -> Result<(), Error> {
-    if elevated {
-        if let Some(handle) = cached_elevated_handle(pid)
-            && unsafe { TerminateProcess(handle.0, 1) } != 0
+/// 停止进程。无文件记录时无法预知是否提权，采用回退链：
+/// 本进程缓存的提权句柄 → 普通 taskkill → 提权 taskkill（UAC）。
+pub(super) fn kill_pid(pid: u32) -> Result<(), Error> {
+    if let Some(handle) = cached_elevated_handle(pid)
+        && unsafe { TerminateProcess(handle.0, 1) } != 0
+    {
+        if let Some(cell) = ELEVATED_PROCESS.get()
+            && let Ok(mut slot) = cell.lock()
         {
-            if let Some(cell) = ELEVATED_PROCESS.get()
-                && let Ok(mut slot) = cell.lock()
-            {
-                *slot = None;
-            }
-            return Ok(());
+            *slot = None;
         }
-        return kill_pid_via_runas(pid);
+        return Ok(());
     }
+    match taskkill(pid) {
+        Ok(()) => Ok(()),
+        // 提权进程普通 taskkill 会拒绝（access denied），退回 UAC 提权执行
+        Err(_) => kill_pid_via_runas(pid),
+    }
+}
+
+fn taskkill(pid: u32) -> Result<(), Error> {
     let output = Command::new("taskkill")
         .args(["/F", "/T", "/PID", &pid.to_string()])
         .stdin(Stdio::null())

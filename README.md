@@ -42,7 +42,7 @@ GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net
 ### 进程管理
 
 - TUI 关闭时**不会**杀掉 mihomo 进程（进程与 TUI 解耦）。
-- 由 TUI 启动的 mihomo 会把 PID 记录在 `{config_dir}/coclash/mihomo.pid`，按 `s` 停止时只杀掉有 PID 记录的实例；外部启动的 mihomo（无 PID 记录）不会被误杀，需自行关闭。
+- mihomo 运行状态不依赖任何文件记录，而是**直接扫描系统进程表**：找到命令行含 `{config_dir}/coclash` 的 mihomo 进程即视为运行中；按 `s` 停止时也只停止匹配该 config_dir 的实例，外部启动（命令行不含本 config_dir）的不会被误杀，需自行关闭。
 - 启动失败但进程残留时（端口未就绪），仍可按 `s` 停止。
 - mihomo 进程的 stdout/stderr 会写入 `{config_dir}/coclash/mihomo.log`，按 `l` 可在 TUI 内查看。
 

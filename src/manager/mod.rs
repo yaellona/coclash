@@ -211,6 +211,10 @@ impl Manager {
         match result {
             Ok(()) => {
                 self.log("正在切换订阅...");
+                if let Err(e) = self.save_config() {
+                    self.log_err(e);
+                    return;
+                }
                 self.reload_config();
             }
             Err(e) => self.log_err(e),

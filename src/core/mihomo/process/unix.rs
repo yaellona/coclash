@@ -30,16 +30,28 @@ pub(super) fn is_pid_alive(pid: u32) -> bool {
 }
 
 /// 判定依据：命令行包含 config_dir（与 windows 语义一致）
-pub(super) fn is_mihomo_pid(_binary: &ResolvedBinary, config_dir: &Path, pid: u32) -> bool {
-    fs::read(format!("/proc/{pid}/cmdline"))
-        .map(|c| {
-            let cmdline = String::from_utf8_lossy(&c);
-            cmdline.contains(config_dir.to_str().unwrap_or(""))
-        })
-        .unwrap_or(false)
+pub(super) fn find_mihomo_pid(_binary: &ResolvedBinary, config_dir: &Path) -> Option<u32> {
+    let dir = config_dir.to_str().unwrap_or("");
+    if dir.is_empty() {
+        return None;
+    }
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        let pid: u32 = match entry.file_name().to_string_lossy().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let cmdline = match fs::read(entry.path().join("cmdline")) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if String::from_utf8_lossy(&cmdline).contains(dir) {
+            return Some(pid);
+        }
+    }
+    None
 }
 
-pub(super) fn kill_pid(pid: u32, _elevated: bool) -> Result<(), Error> {
+pub(super) fn kill_pid(pid: u32) -> Result<(), Error> {
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
     }
@@ -63,7 +75,7 @@ pub(super) fn kill_pid(pid: u32, _elevated: bool) -> Result<(), Error> {
 
 // ===== 查找 mihomo PID（TUN 权限检查用）=====
 
-fn find_mihomo_pid(config_dir: &str) -> Option<u32> {
+fn find_any_mihomo_pid(config_dir: &str) -> Option<u32> {
     for entry in fs::read_dir("/proc").ok()?.flatten() {
         let pid: u32 = match entry.file_name().to_string_lossy().parse() {
             Ok(p) => p,
@@ -91,7 +103,7 @@ fn find_mihomo_pid(config_dir: &str) -> Option<u32> {
 
 /// TUN 权限检查：mihomo 进程缺少 CAP_NET_ADMIN/CAP_NET_RAW 时给出提示
 pub fn tun_capability_warning() -> Option<String> {
-    let pid = find_mihomo_pid("")?;
+    let pid = find_any_mihomo_pid("")?;
     let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let cap_eff = status.lines().find_map(|l| {
         l.strip_prefix("CapEff:\t")

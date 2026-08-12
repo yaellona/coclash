@@ -7,7 +7,6 @@ pub const SUBSCRIPTION_UA: &str =
 pub const CONFIG_DIR_NAME: &str = "coclash";
 pub const CONFIG_FILE: &str = "config.yaml";
 pub const SETTINGS_FILE: &str = "settings.json";
-pub const PID_FILE: &str = "mihomo.pid";
 pub const MIHOMO_LOG_FILE: &str = "mihomo.log";
 
 /// 默认监听端口（config.yaml 缺失时生成默认配置用）
