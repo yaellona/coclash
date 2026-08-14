@@ -16,6 +16,7 @@ use crate::operation_log::LogType;
 use crate::settings::Settings;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,6 +26,8 @@ pub struct TaskRunner {
     settings: Settings,
     config_path: PathBuf,
     state: Arc<Mutex<AppState>>,
+    /// 重绘请求标志（与 Manager.redraw 同一原子）：后台回灌置位，主循环消费
+    redraw: Arc<AtomicBool>,
 }
 
 impl TaskRunner {
@@ -33,6 +36,7 @@ impl TaskRunner {
         config_path: PathBuf,
         group_name: &str,
         state: Arc<Mutex<AppState>>,
+        redraw: Arc<AtomicBool>,
     ) -> Result<Self, Error> {
         let api = Arc::new(ApiClient::new(settings, group_name)?);
         Ok(Self {
@@ -40,6 +44,7 @@ impl TaskRunner {
             settings: settings.clone(),
             config_path,
             state,
+            redraw,
         })
     }
 
@@ -51,8 +56,9 @@ impl TaskRunner {
     pub fn load_nodes(&self) {
         let api = self.api.clone();
         let state = self.state.clone();
+        let redraw = self.redraw.clone();
         self.spawn(async move {
-            load_nodes_impl(&api, &state).await;
+            load_nodes_impl(&api, &state, &redraw).await;
         });
     }
 
@@ -60,12 +66,14 @@ impl TaskRunner {
     pub fn start_delay_test(&self) {
         let api = self.api.clone();
         let state = self.state.clone();
+        let redraw = self.redraw.clone();
         self.spawn(async move {
             {
                 // 预置（守卫：已在测速则拒绝）
                 let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
                 if st.is_test_delay {
                     st.logs.add_log(LogType::Warn, "已经在测速了!".into());
+                    redraw.store(true, Ordering::Relaxed);
                     return;
                 }
                 st.is_test_delay = true;
@@ -73,6 +81,7 @@ impl TaskRunner {
                     node.speed = "wait".to_string();
                 }
             }
+            redraw.store(true, Ordering::Relaxed);
             let result = api.fetch_delays().await;
             // 回灌
             let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -89,6 +98,7 @@ impl TaskRunner {
                 }
                 Err(e) => st.logs.add_log(LogType::Error, e.to_string()),
             }
+            redraw.store(true, Ordering::Relaxed);
         });
     }
 
@@ -97,12 +107,14 @@ impl TaskRunner {
     pub fn switch_node(&self, index: usize) {
         let api = self.api.clone();
         let state = self.state.clone();
+        let redraw = self.redraw.clone();
         self.spawn(async move {
             let name = {
                 // 预置
                 let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
                 if st.is_switching_node {
                     st.logs.add_log(LogType::Warn, "正在切换节点，请稍候".into());
+                    redraw.store(true, Ordering::Relaxed);
                     return;
                 }
                 let Some(node) = st.nodes.get(index) else {
@@ -113,6 +125,7 @@ impl TaskRunner {
                 st.active_node = Some(index);
                 name
             };
+            redraw.store(true, Ordering::Relaxed);
             let result = api.switch_node(&name).await;
             // 回灌
             let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -121,6 +134,7 @@ impl TaskRunner {
                 Ok(()) => st.logs.add_log(LogType::Info, format!("切换节点：{name}")),
                 Err(e) => st.logs.add_log(LogType::Error, e.to_string()),
             }
+            redraw.store(true, Ordering::Relaxed);
         });
     }
 
@@ -129,10 +143,11 @@ impl TaskRunner {
         let api = self.api.clone();
         let path = self.config_path.clone();
         let state = self.state.clone();
+        let redraw = self.redraw.clone();
         let retry = self.settings.provider_retry.max(1);
         let interval = self.settings.provider_retry_interval();
         self.spawn(async move {
-            reload_config_impl(&api, &state, &path, retry, interval).await;
+            reload_config_impl(&api, &state, &redraw, &path, retry, interval).await;
         });
     }
 
@@ -141,6 +156,7 @@ impl TaskRunner {
         let api = self.api.clone();
         let state = self.state.clone();
         let config_path = self.config_path.clone();
+        let redraw = self.redraw.clone();
         let retry = self.settings.provider_retry.max(1);
         let interval = self.settings.provider_retry_interval();
         self.spawn(async move {
@@ -160,6 +176,7 @@ impl TaskRunner {
                 let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
                 st.config.insert_sub(url, name.clone());
             }
+            redraw.store(true, Ordering::Relaxed);
             // 锁外写盘 + 续发重载
             match save_config(&state, &config_path) {
                 Ok(()) => {
@@ -168,13 +185,17 @@ impl TaskRunner {
                         .unwrap_or_else(|e| e.into_inner())
                         .logs
                         .add_log(LogType::Info, format!("插入订阅：{name}"));
-                    reload_config_impl(&api, &state, &config_path, retry, interval).await;
+                    redraw.store(true, Ordering::Relaxed);
+                    reload_config_impl(&api, &state, &redraw, &config_path, retry, interval).await;
                 }
-                Err(e) => state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .logs
-                    .add_log(LogType::Error, e.to_string()),
+                Err(e) => {
+                    state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .logs
+                        .add_log(LogType::Error, e.to_string());
+                    redraw.store(true, Ordering::Relaxed);
+                }
             }
         });
     }
@@ -186,6 +207,7 @@ impl TaskRunner {
         let interval = self.settings.provider_retry_interval();
         let api = self.api.clone();
         let state = self.state.clone();
+        let redraw = self.redraw.clone();
         self.spawn(async move {
             let mut ready = false;
             for _ in 0..attempts {
@@ -204,7 +226,8 @@ impl TaskRunner {
                     .unwrap_or_else(|e| e.into_inner())
                     .logs
                     .add_log(LogType::Info, "mihomo 已就绪，正在拉取节点".into());
-                load_nodes_impl(&api, &state).await;
+                redraw.store(true, Ordering::Relaxed);
+                load_nodes_impl(&api, &state, &redraw).await;
             } else {
                 state
                     .lock()
@@ -214,6 +237,7 @@ impl TaskRunner {
                         LogType::Warn,
                         "进程已启动但端口未就绪（启动可能较慢或失败），可按 s 停止后重试".into(),
                     );
+                redraw.store(true, Ordering::Relaxed);
             }
         });
     }
@@ -227,7 +251,7 @@ impl TaskRunner {
 // ===== 任务实现（与 TaskRunner 方法一一对应，可被续发复用） =====
 
 /// 拉取节点列表并回灌到共享状态
-async fn load_nodes_impl(api: &ApiClient, state: &Arc<Mutex<AppState>>) {
+async fn load_nodes_impl(api: &ApiClient, state: &Arc<Mutex<AppState>>, redraw: &Arc<AtomicBool>) {
     match api.get_proxy().await {
         Ok(proxy) => {
             let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -237,12 +261,16 @@ async fn load_nodes_impl(api: &ApiClient, state: &Arc<Mutex<AppState>>) {
             let max = st.nodes.len().saturating_sub(1);
             st.select = st.select.min(max);
             st.logs.add_log(LogType::Info, "更新代理信息".into());
+            redraw.store(true, Ordering::Relaxed);
         }
-        Err(e) => state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .logs
-            .add_log(LogType::Error, e.to_string()),
+        Err(e) => {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .logs
+                .add_log(LogType::Error, e.to_string());
+            redraw.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -251,6 +279,7 @@ async fn load_nodes_impl(api: &ApiClient, state: &Arc<Mutex<AppState>>) {
 async fn reload_config_impl(
     api: &ApiClient,
     state: &Arc<Mutex<AppState>>,
+    redraw: &Arc<AtomicBool>,
     path: &Path,
     retry: u32,
     interval: Duration,
@@ -262,6 +291,7 @@ async fn reload_config_impl(
                 .unwrap_or_else(|e| e.into_inner())
                 .logs
                 .add_log(LogType::Info, "重置配置成功".into());
+            redraw.store(true, Ordering::Relaxed);
         }
         Err(e) => {
             state
@@ -269,10 +299,11 @@ async fn reload_config_impl(
                 .unwrap_or_else(|e| e.into_inner())
                 .logs
                 .add_log(LogType::Error, e.to_string());
+            redraw.store(true, Ordering::Relaxed);
         }
     }
     for _ in 0..retry {
-        load_nodes_impl(api, state).await;
+        load_nodes_impl(api, state, redraw).await;
         let populated = state
             .lock()
             .unwrap_or_else(|e| e.into_inner())

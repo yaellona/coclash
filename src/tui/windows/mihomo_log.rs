@@ -27,6 +27,8 @@ pub struct MihomoLogWindow {
     /// 上次绘制的可见行数（翻页用）
     visible: usize,
     last_size: u64,
+    /// 上次折行时的显示宽度（宽度/文件未变则跳过重折行）
+    last_width: usize,
 }
 
 #[window]
@@ -39,19 +41,21 @@ impl MihomoLogWindow {
             scroller: Scroller::new(),
             visible: 1,
             last_size: 0,
+            last_width: 0,
         }
     }
 
     pub fn on_open(&mut self) {}
 
-    /// 文件有更新时重新读取尾部，跟随模式自动滚到底部
-    fn refresh(&mut self) {
+    /// 文件有更新时重新读取尾部，跟随模式自动滚到底部；返回是否更新
+    fn refresh(&mut self) -> bool {
         let size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
         if size == self.last_size {
-            return;
+            return false;
         }
         self.last_size = size;
         self.lines = read_tail(&self.path, MAX_TAIL_BYTES, MAX_TAIL_LINES);
+        true
     }
 
     #[key(KeyCode::Esc, "关闭", footer = false)]
@@ -88,9 +92,12 @@ impl MihomoLogWindow {
     /// 每帧渲染前调用：读文件更新 + 折行 + 收敛滚动。
     /// 状态副作用集中在此，`draw` 其余部分保持只读渲染。
     fn update(&mut self, width: usize, height: usize) {
-        self.refresh();
+        let changed = self.refresh();
         self.visible = height.saturating_sub(1).max(1);
-        self.rows = wrap_lines(&self.lines, width.max(1));
+        if changed || width != self.last_width {
+            self.rows = wrap_lines(&self.lines, width.max(1));
+            self.last_width = width;
+        }
         self.scroller.clamp(self.rows.len());
     }
 

@@ -1,5 +1,7 @@
 ﻿//! 入口：终端初始化 + 事件循环，业务逻辑见 `coclash` 库。
 use coclash::core::mihomo::MihomoStatus;
+use coclash::tui::event::LoopEvent;
+use coclash::tui::Page;
 use coclash::{manager, tui};
 use crossterm::{
     execute,
@@ -7,6 +9,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
+use std::sync::atomic::Ordering;
 
 /// RAII：无论正常退出、错误还是 panic，都恢复终端
 struct TerminalGuard;
@@ -46,12 +49,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut windows = tui::Windows::new(&manager);
 
+    // 条件重绘：仅在「有事件/状态变更」时构建帧，空闲时 CPU 趋近于 0。
+    // 状态变更统一通过 manager.redraw 置位（后台任务回灌 + 同步命令），
+    // 按键与终端缩放直接置 dirty；mihomo 日志页文件持续增长，每 tick 强制重绘。
+    terminal.draw(|f| windows.draw(&manager, f))?;
+
     loop {
-        terminal.draw(|f| windows.draw(&manager, f))?;
-        if let Some(key) = tui::event::poll_event(&manager.settings)? {
-            windows.handle_key(&manager, key);
+        let mut dirty = false;
+        match tui::event::poll_event(&manager.settings)? {
+            LoopEvent::Key(key) => {
+                windows.handle_key(&manager, key);
+                dirty = true;
+            }
+            LoopEvent::Resize(_, _) => dirty = true,
+            LoopEvent::Timeout => {}
         }
-        if manager.should_quit.load(std::sync::atomic::Ordering::Relaxed) {
+        dirty |= manager.redraw.swap(false, Ordering::Relaxed);
+        if windows.current == Page::MihomoLog {
+            dirty = true;
+        }
+        if dirty {
+            terminal.draw(|f| windows.draw(&manager, f))?;
+        }
+        if manager.should_quit.load(Ordering::Relaxed) {
             break;
         }
     }

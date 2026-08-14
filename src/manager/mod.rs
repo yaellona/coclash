@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::operation_log::{LogType, OperationLogs};
 use crate::settings::Settings;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use state::AppState;
@@ -30,6 +30,8 @@ pub struct Manager {
     pub config_path: PathBuf,
     pub should_quit: AtomicBool,
     tasks: TaskRunner,
+    /// 重绘请求标志：后台回灌/状态变更置位，主循环消费后清零（dirty-flag 条件重绘）
+    pub redraw: Arc<AtomicBool>,
 }
 
 impl Manager {
@@ -83,7 +85,14 @@ impl Manager {
             st.proxy_running = get_proxy_status().is_ok_and(|(v, _)| v == 1);
         }
 
-        let tasks = TaskRunner::new(&settings, config_path.clone(), &group_name, state.clone())?;
+        let redraw = Arc::new(AtomicBool::new(true));
+        let tasks = TaskRunner::new(
+            &settings,
+            config_path.clone(),
+            &group_name,
+            state.clone(),
+            redraw.clone(),
+        )?;
 
         Ok(Self {
             state,
@@ -91,6 +100,7 @@ impl Manager {
             config_path,
             should_quit: AtomicBool::new(false),
             tasks,
+            redraw,
         })
     }
 
@@ -103,20 +113,28 @@ impl Manager {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 标记需要重绘（状态变更的统一信号，主循环消费后清零）
+    fn mark_redraw(&self) {
+        self.redraw.store(true, Ordering::Relaxed);
+    }
+
     // ===== 日志 =====
 
     pub fn log(&self, msg: impl Into<String>) {
         self.state_lock().logs.add_log(LogType::Info, msg.into());
+        self.mark_redraw();
     }
 
     pub fn log_err(&self, e: impl std::fmt::Display) {
         self.state_lock()
             .logs
             .add_log(LogType::Error, e.to_string());
+        self.mark_redraw();
     }
 
     pub fn log_warn(&self, msg: impl Into<String>) {
         self.state_lock().logs.add_log(LogType::Warn, msg.into());
+        self.mark_redraw();
     }
 
     // ===== 配置编辑（锁内纯内存修改，落盘走 save_config） =====
@@ -124,7 +142,10 @@ impl Manager {
     /// 配置编辑（锁内纯内存修改，落盘走 save_config）；返回闭包结果
     pub fn edit_config<R>(&self, f: impl FnOnce(&mut MihomoConfig) -> R) -> R {
         let mut st = self.state_lock();
-        f(&mut st.config)
+        let r = f(&mut st.config);
+        drop(st);
+        self.mark_redraw();
+        r
     }
 
     /// 配置落盘（序列化在锁内、写盘在锁外），成功后由调用方决定是否重载
@@ -145,6 +166,7 @@ impl Manager {
                     binary.cmd
                 ));
                 self.tasks.wait_for_start();
+                self.mark_redraw();
             }
             Err(e) => self.log_err(e),
         }
@@ -156,6 +178,7 @@ impl Manager {
             Ok(()) => {
                 self.state_lock().mihomo_status = MihomoStatus::Stopped;
                 self.log("已停止mihomo");
+                self.mark_redraw();
             }
             Err(e) => self.log_err(e),
         }
@@ -174,6 +197,7 @@ impl Manager {
             .map(|(code, _)| code == 1)
             .unwrap_or(false);
         self.state_lock().proxy_running = !is_enabled;
+        self.mark_redraw();
         if is_enabled {
             match disable_proxy() {
                 Ok(()) => self.log("关闭系统代理"),

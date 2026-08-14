@@ -14,8 +14,8 @@ impl Content {
             .iter()
             .map(|node| {
                 Row::new(vec![
-                    Cell::from(node.name.clone()),
-                    Cell::from(node.speed.clone()),
+                    Cell::from(node.name.as_str()),
+                    Cell::from(node.speed.as_str()),
                 ])
             })
             .collect();
