@@ -10,7 +10,10 @@
 
 ## 安装
 
-`coclash` **自带 mihomo**（构建期压缩嵌入，运行时释放到缓存目录），无需预装任何东西。
+`coclash` **自带 mihomo**（构建期压缩嵌入），无需预装任何东西：
+
+- `coclash`：TUI；Linux 默认把内核解压到内存（memfd）直接执行，运行期不落盘；Windows 释放为退出即删的临时文件。
+- `coclash core [参数]`：等价原生 mihomo，参数原样透传（`-d`/`-f`/`-v`…），Unix 下直接替换进程（PID/信号/退出码一致）。
 
 ### windows
 
@@ -27,7 +30,9 @@ imports = [ inputs.coclash.nixosModules.default ];
 programs.coclash.enable = true;
 ```
 
-`enable` 只安装 coclash 本身：mihomo 内嵌在二进制里，不再依赖 nixpkgs 的 mihomo，也不需要 `security.wrappers`。
+`enable` 会安装 coclash（mihomo 内嵌在二进制里，不依赖 nixpkgs 的 mihomo），并默认通过 `security.wrappers` 给 coclash 授予 `CAP_NET_ADMIN/CAP_NET_RAW`——**TUN 开箱可用，无需手动 setcap**。不想要 capabilities 时设置 `programs.coclash.tun = false`。
+
+原理：`security.wrappers` 生成 `/run/wrappers/bin/coclash`（在 shell PATH 中优先），它把 capabilities 提升进 ambient set 后再执行 coclash，内嵌 mihomo 随之继承。请从 PATH 运行 `coclash`；直接执行 store 路径不会带权限。
 
 ### archlinux以及其他发行版
 
@@ -37,23 +42,36 @@ programs.coclash.enable = true;
 
 首次进入`coclash`的时候，`mihomo`启动了≠能用了，如果发现读取`mihomo`端口失败了，说明`mihomo`还没有下载`GeoSite`数据库，需要等待一段时间下载数据库。
 
+不想要 TUI 时可直接跑内核（参数与原生 mihomo 完全一致）：
+
+```bash
+coclash core -v
+coclash core -d ~/.config/coclash -f config.yaml
+```
+
 ### 内嵌 mihomo
 
 - 版本固定在 `mihomo.lock`，构建时自动取用（优先 `vendor/mihomo/<target>/mihomo[.exe]`，没有才下载并解压到该目录；`COCLASH_EMBED_MIHOMO` 可指定构建期来源，供 Nix/离线构建使用）。
-- 运行时释放到 `{cache_dir}/coclash/bin/<sha8>/mihomo[.exe]`（Windows 为 `%LOCALAPPDATA%`），存在即复用；`COCLASH_MIHOMO_DIR` 可改缓存根。
+- 运行时来源（`coclash core` 与 TUI 启动共用）：
+  - Linux：解压到内存（`memfd_create`）直接执行，进程显示为 `memfd:mihomo`，运行期不落盘；
+  - Windows：释放到 `%TEMP%\coclash-<pid>\mihomo.exe`，内核退出后自动删除；coclash 先退出时残留目录由下次启动清理；
+  - 兜底（内核不支持内存执行/临时文件失败）或显式要求时释放到 `{cache_dir}/coclash/bin/<sha8>/mihomo[.exe]`（Windows 为 `%LOCALAPPDATA%`）；`COCLASH_MIHOMO_DIR` 指定缓存根、`COCLASH_MIHOMO_EXTRACT=1`，两者都会强制落盘。
 - 更新 mihomo：改 `mihomo.lock` 的版本/资产/哈希后重新编译（`vendor/mihomo/` 下对应文件需删除）。
 - 不需要内嵌时可用 `cargo build --no-default-features`（此时无法启动 mihomo）。
 - 内嵌的 mihomo 以 GPL-3.0 分发，许可证见 [assets/licenses/mihomo-GPL-3.0.txt](./assets/licenses/mihomo-GPL-3.0.txt)，源码：<https://github.com/MetaCubeX/mihomo>。
 
 ### Linux TUN 权限
 
-内嵌 mihomo 释放到用户缓存目录，不带文件 capabilities。需要 TUN 时按 TUI 日志提示执行一次：
+mihomo 默认在内存中执行，没有磁盘文件可以 `setcap`，权限需要给 **coclash 本体**：
+
+- **NixOS**：`programs.coclash.enable = true` 已自动完成（见上），TUN 直接可用；不要手动 `setcap /run/wrappers/bin/coclash`，那会覆盖 wrapper 依赖的 `cap_setpcap`，破坏 ambient 传递。
+- **其他发行版**：给 coclash 授权后由它启动内核（启动时以 ambient capability 传给 mihomo）：
 
 ```bash
-sudo setcap cap_net_admin,cap_net_raw+eip ~/.cache/coclash/bin/<sha8>/mihomo
+sudo setcap cap_net_admin,cap_net_raw+eip $(which coclash)
 ```
 
-（缓存路径含内容哈希，升级内嵌版本后需要对新路径重新授权。）
+（若使用强制落盘模式，也可以继续对释放出的 mihomo 单独 `setcap`。）
 
 ### Geo 数据源
 
@@ -67,6 +85,7 @@ GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net
 - 停止按「控制端口属主」定位，不会误杀监听其它端口的 mihomo；若端口被非 mihomo 程序占用，
   停止会报「未找到监听控制端口的 mihomo 进程」，启动则报端口占用。
 - 启动失败但进程残留时（端口未就绪），仍可按 `s` 停止。
+- `coclash core` 启动的实例同样能被 TUI 停止（按 `/proc/<pid>/exe` 识别内存执行的 `memfd:mihomo`）。
 - mihomo 进程的 stdout/stderr 会写入 `{config_dir}/coclash/mihomo.log`，按 `l` 可在 TUI 内查看。
 
 ### 心跳同步
@@ -90,8 +109,10 @@ TUI 通过 mihomo 的 external-controller RESTful API 交互（心跳同步、�
 
 ```
 src/
-├── main.rs        入口：终端初始化 + 事件循环
+├── main.rs        入口：CLI 分派（core 直通内核 / 默认 TUI）+ 事件循环
+├── cli.rs         `coclash [core|help]` 参数解析
 ├── core/          与 mihomo 的纯 IO（RESTful API、进程、config.yaml、系统代理）
+│   └── mihomo/    内嵌内核（embedded）与进程/启动平台层（process/{unix,windows}.rs）
 ├── manager/       共享状态与命令层
 │   ├── state.rs       AppState { logs, config, mihomo }
 │   ├── commands.rs    副作用契约 Effect/ConfigChange 与 Manager::exec

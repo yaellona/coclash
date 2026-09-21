@@ -1,8 +1,9 @@
-//! 内嵌 mihomo：编译期压缩嵌入（gz），运行期释放到缓存目录。
+//! 内嵌 mihomo：编译期压缩嵌入（gz），运行期按需解压到内存或缓存目录。
 //!
 //! 这是 mihomo 的**唯一来源**：没有环境变量 / PATH / Nix wrapper 解析链。
-//! 释放路径：`{cache_dir}/coclash/bin/{sha8}/mihomo[.exe]`
-//! （缓存根可用 `COCLASH_MIHOMO_DIR` 覆盖，仅影响释放位置，不影响来源）。
+//! 默认由 `process` 平台层解压到内存执行（Linux memfd / Windows 自删除临时文件）；
+//! 仅在兜底或强制落盘时释放到 `{cache_dir}/coclash/bin/{sha8}/mihomo[.exe]`
+//! （缓存根可用 `COCLASH_MIHOMO_DIR` 覆盖，同时视为强制落盘）。
 //!
 //! 未启用 `embed-mihomo` feature 时提供同签名 stub，保证编译并给出明确报错。
 use crate::error::Error;
@@ -17,6 +18,28 @@ use std::path::Path;
 
 #[cfg(feature = "embed-mihomo")]
 const EMBEDDED_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mihomo.gz"));
+
+/// 解压内嵌 mihomo 到内存；未启用 `embed-mihomo` 时返回明确错误。
+pub(crate) fn decompress_embedded() -> Result<Vec<u8>, Error> {
+    #[cfg(feature = "embed-mihomo")]
+    {
+        decompress(EMBEDDED_GZ)
+    }
+    #[cfg(not(feature = "embed-mihomo"))]
+    {
+        Err(Error::Process(
+            "本二进制未嵌入 mihomo（构建时请启用 embed-mihomo feature）".to_string(),
+        ))
+    }
+}
+
+/// 纯函数：gz → 原始字节（内存执行与落盘共用同一解压实现）
+#[cfg(feature = "embed-mihomo")]
+pub(crate) fn decompress(gz: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut raw = Vec::new();
+    flate2::read::GzDecoder::new(gz).read_to_end(&mut raw)?;
+    Ok(raw)
+}
 
 /// 内嵌 mihomo 的版本（编译期确定）
 #[cfg(feature = "embed-mihomo")]
@@ -69,8 +92,7 @@ pub fn ensure_extracted_with(gz: &[u8], dir: &Path, expected_size: u64) -> Resul
         return Ok(path);
     }
     fs::create_dir_all(dir)?;
-    let mut raw = Vec::with_capacity(expected_size as usize);
-    flate2::read::GzDecoder::new(gz).read_to_end(&mut raw)?;
+    let raw = decompress(gz)?;
     if raw.len() as u64 != expected_size {
         return Err(Error::Process(format!(
             "内嵌 mihomo 解压大小不符：期望 {expected_size}，实际 {}",
@@ -152,6 +174,17 @@ mod tests {
     fn test_bad_gz_errors() {
         let dir = tempfile::TempDir::new().unwrap();
         assert!(ensure_extracted_with(b"not-gzip", dir.path(), 10).is_err());
+        assert!(decompress(b"not-gzip").is_err());
+    }
+
+    #[test]
+    fn test_decompress_embedded_matches_size() {
+        let raw = decompress_embedded().unwrap();
+        assert_eq!(
+            raw.len() as u64,
+            SIZE.parse::<u64>().unwrap(),
+            "内存解压大小应与构建期记录一致"
+        );
     }
 
     #[cfg(unix)]

@@ -4,7 +4,7 @@
 //! 本文件只保留需要真实系统环境的测试，默认 `#[ignore]`，显式用
 //! `cargo test -- --ignored` 运行：
 //!
-//! - `live_embedded_mihomo_extract`：内嵌 mihomo 释放到缓存并可执行
+//! - `live_embedded_mihomo_extract`：内嵌 mihomo 兜底解压到缓存并可执行
 //! - `live_embedded_mihomo_start_stop`：用内嵌 mihomo 真实启动/停止（临时目录 + 独立端口）
 //! - `live_heartbeat_sync`：要求本机 external-controller（默认 127.0.0.1:9090）有 mihomo
 
@@ -36,7 +36,7 @@ async fn live_heartbeat_sync() {
 }
 
 /// 活体验证（默认跳过，需显式运行）：
-/// 内嵌 mihomo 能释放到缓存目录、可执行，且版本与编译期一致。
+/// 内嵌 mihomo 能兜底解压到缓存目录、可执行，且版本与编译期一致。
 #[test]
 #[ignore = "会写入缓存目录，需显式运行"]
 fn live_embedded_mihomo_extract() {
@@ -85,8 +85,9 @@ fn live_embedded_mihomo_start_stop() {
         mihomo_ctrl_addr: "127.0.0.1:19090".to_string(),
         ..Settings::default()
     };
-    let (pid, bin) =
+    let (pid, source) =
         mihomo::start_mihomo(&settings, &config_path, false).expect("启动内嵌 mihomo 失败");
+    println!("内核来源: {source}");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline && !mihomo::process::is_port_up(&settings) {
@@ -94,8 +95,7 @@ fn live_embedded_mihomo_start_stop() {
     }
     assert!(
         mihomo::process::is_port_up(&settings),
-        "内嵌 mihomo 未在 10s 内就绪: {}",
-        bin.display()
+        "内嵌 mihomo 未在 10s 内就绪: {source}"
     );
     assert!(
         mihomo::process::is_pid_alive(pid),

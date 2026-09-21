@@ -18,6 +18,7 @@ pub mod core;
 pub mod manager;
 pub mod tui;
 
+pub mod cli;
 pub mod constants;
 pub mod error;
 pub mod operation_log;

@@ -1,5 +1,6 @@
-//! 入口：终端初始化 + 事件循环，业务逻辑见 `coclash` 库。
+//! 入口：CLI 分派（默认 TUI，`core` 直通内嵌 mihomo）+ 终端初始化 + 事件循环。
 //! 心跳（Manager::start_heartbeat）是唯一的状态同步来源，主循环只消费重绘标志。
+use coclash::cli::{self, Cli};
 use coclash::core::mihomo::MihomoStatus;
 use coclash::tui::PageId;
 use coclash::tui::event::LoopEvent;
@@ -28,8 +29,27 @@ impl Drop for TerminalGuard {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match Cli::parse(std::env::args_os().skip(1)) {
+        Cli::Help => {
+            print!("{}", cli::help_text());
+            Ok(())
+        }
+        // Unix 成功时进程已被 mihomo 替换（不返回）；Windows 等待结束并透传退出码
+        Cli::Core(args) => Ok(coclash::core::mihomo::exec_core(&args)?),
+        Cli::Tui => run_tui(),
+    }
+}
+
+/// TUI 模式：手建 tokio runtime（core 模式不初始化任何运行时）
+fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(tui_loop())
+}
+
+async fn tui_loop() -> Result<(), Box<dyn std::error::Error>> {
     // 先完成所有可能失败的 IO 初始化，再进入 raw mode / alternate screen
     let manager = manager::Manager::new()?;
     manager.start_heartbeat();

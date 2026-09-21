@@ -216,12 +216,11 @@ impl Manager {
         // Windows 上只要启动 mihomo 就请求管理员权限（TUN 或普通代理都提权）
         let elevate = cfg!(windows);
         match mihomo::start_mihomo(&self.shared.settings, &self.shared.config_path, elevate) {
-            Ok((pid, binary)) => {
+            Ok((pid, source)) => {
                 self.state_lock().mihomo.status = MihomoStatus::Running(pid);
                 self.log(format!(
-                    "mihomo 已启动 (PID {pid}, 内嵌 {}: {})",
+                    "mihomo 已启动 (PID {pid}, 内嵌 {}: {source})",
                     mihomo::embedded::VERSION,
-                    binary.display()
                 ));
                 // 立即同步：端口就绪后心跳会拉取节点与运行时信息
                 self.sync_now();

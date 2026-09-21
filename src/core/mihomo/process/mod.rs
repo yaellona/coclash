@@ -1,19 +1,19 @@
-//! mihomo 进程管理：端口/状态探测、启动/停止。
+//! mihomo 进程管理：内核来源物化、端口/状态探测、启动/停止/替换。
 //!
 //! 平台差异收敛在 `platform` 子模块（`windows`/`unix` 二选一，见各文件顶部文档）：
-//! 各平台只实现「探测与启动/终止」的最小差异，公共流程（状态判定、
-//! 日志重定向、SIGTERM→SIGKILL 语义）保持在本模块，双平台行为一致。
+//! 平台只实现「内核可执行来源的物化与启动/替换」的最小差异（Linux memfd、
+//! Windows 自删除临时文件），公共流程（端口检查、状态判定、日志重定向语义）
+//! 保持在本模块，双平台行为一致。
 //!
-//! mihomo 可执行文件来自**内嵌**（`super::embedded`）：启动前释放到缓存目录。
-//! 运行状态只看控制端口是否可达（不区分是否由本程序启动）；停止时按控制端口
-//! 找到属主 mihomo 并结束，因此外部启动的实例也能直接关闭，且不会误杀其它实例。
-use crate::constants::MIHOMO_LOG_FILE;
+//! 内核可执行文件来自**内嵌**（`super::embedded`）：默认解压到内存执行，
+//! 失败或显式要求时兜底释放到缓存目录。运行状态只看控制端口是否可达
+//! （不区分是否由本程序启动）；停止时按控制端口找到属主 mihomo 并结束，
+//! 因此外部启动的实例也能直接关闭，且不会误杀其它实例。
 use crate::error::Error;
 use crate::settings::Settings;
-use std::fs::OpenOptions;
+use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::embedded;
@@ -28,6 +28,29 @@ use unix as platform;
 /// 当前平台实现（二选一）
 #[cfg(windows)]
 use windows as platform;
+
+// ===== 内核可执行来源 =====
+
+/// 内嵌 mihomo 的运行形态（跨平台统一展示，日志/UI 用）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BinarySource {
+    /// Linux memfd：解压只在内存，运行期不落盘
+    Memory,
+    /// Windows 临时文件：进程退出后自动删除
+    TempFile(PathBuf),
+    /// 磁盘缓存文件：兜底、强制落盘或非 Linux 平台
+    CacheFile(PathBuf),
+}
+
+impl std::fmt::Display for BinarySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Memory => write!(f, "内存执行 (memfd)"),
+            Self::TempFile(path) => write!(f, "临时文件: {}", path.display()),
+            Self::CacheFile(path) => write!(f, "磁盘文件: {}", path.display()),
+        }
+    }
+}
 
 // ===== mihomo 运行状态 =====
 
@@ -86,13 +109,13 @@ pub fn detect_status(settings: &Settings) -> MihomoStatus {
 // ===== mihomo 进程管理 =====
 
 /// 启动内嵌 mihomo。`elevate` 仅 Windows 生效（UAC 提权启动）。
-/// 返回 (PID, 释放后的可执行文件路径)。
+/// 返回 (PID, 实际内核来源)。
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub fn start_mihomo(
     settings: &Settings,
     config_path: &Path,
     elevate: bool,
-) -> Result<(u32, PathBuf), Error> {
+) -> Result<(u32, BinarySource), Error> {
     let config_dir = config_path
         .parent()
         .ok_or(Error::Process("无法获取配置目录".to_string()))?;
@@ -102,47 +125,16 @@ pub fn start_mihomo(
         ));
     }
 
-    // 唯一来源：释放内嵌 mihomo 到缓存目录
-    let binary = embedded::ensure_extracted()?;
-
-    #[cfg(windows)]
-    if elevate {
-        let pid = platform::start_elevated(&binary, config_dir)?;
-        return Ok((pid, binary));
-    }
-
-    let pid = spawn_detached(&binary, config_dir)?;
-    Ok((pid, binary))
+    // 平台层物化内核（内存 / 自删除临时文件 / 缓存兜底）并启动
+    let prepared = platform::prepare_exec()?;
+    platform::start(prepared, config_dir, elevate)
 }
 
-/// 普通（非提权）启动：日志重定向 + 平台分离会话配置
-fn spawn_detached(binary: &Path, config_dir: &Path) -> Result<u32, Error> {
-    let mut cmd = Command::new(binary);
-    cmd.args([
-        "-d",
-        config_dir
-            .to_str()
-            .ok_or(Error::Process("config路径无效".to_string()))?,
-    ])
-    .stdin(Stdio::null());
-
-    // mihomo 的 stdout/stderr 重定向到日志文件，便于排查启动失败
-    let log_path = config_dir.join(MIHOMO_LOG_FILE);
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| Error::Process(format!("打开日志文件失败: {e}")))?;
-    let file2 = file
-        .try_clone()
-        .map_err(|e| Error::Process(format!("克隆日志文件失败: {e}")))?;
-    cmd.stdout(Stdio::from(file)).stderr(Stdio::from(file2));
-
-    platform::configure_detached(&mut cmd)?;
-    let child = cmd
-        .spawn()
-        .map_err(|e| Error::Process(format!("启动 mihomo 失败: {e}")))?;
-    Ok(child.id())
+/// 以「原生 mihomo」方式运行：参数原样透传并替换/接管当前进程（`coclash core`）。
+/// Unix 成功时进程已被替换（不返回）；Windows 等待子进程结束并透传退出码。
+pub fn exec_core(args: &[OsString]) -> Result<(), Error> {
+    let prepared = platform::prepare_exec()?;
+    platform::exec_replace(&prepared, args)
 }
 
 /// 停止 mihomo：按控制端口找到属主进程（不区分是否由本程序启动），找不到则报错
@@ -184,5 +176,14 @@ mod tests {
         assert!(is_pid_alive(pid));
         child.wait().unwrap();
         assert!(!is_pid_alive(pid));
+    }
+
+    #[test]
+    fn test_binary_source_display() {
+        assert_eq!(BinarySource::Memory.to_string(), "内存执行 (memfd)");
+        let temp = BinarySource::TempFile(PathBuf::from("/tmp/mihomo.exe"));
+        assert!(temp.to_string().contains("临时文件"));
+        let cache = BinarySource::CacheFile(PathBuf::from("/cache/mihomo"));
+        assert!(cache.to_string().contains("磁盘文件"));
     }
 }
