@@ -1,9 +1,10 @@
+pub mod action;
+pub mod cmd;
 pub mod event;
-pub mod keymap;
 pub mod layout;
+pub mod page;
+pub mod pages;
 pub mod scroll;
-pub mod window;
 pub mod widgets;
-pub mod windows;
 
-pub use windows::{Page, Windows};
+pub use pages::{PageId, Pages};

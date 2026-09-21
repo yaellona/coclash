@@ -1,7 +1,7 @@
 //! Windows 平台实现：UAC 提权启动（ShellExecuteExW）、taskkill/TerminateProcess 停止、
 //! PowerShell CIM / tasklist 进程信息探测。
-use super::super::binary::ResolvedBinary;
 use crate::error::Error;
+use crate::settings::Settings;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -92,9 +92,9 @@ fn process_id_of(handle: ProcessHandle) -> Option<u32> {
     if pid == 0 { None } else { Some(pid) }
 }
 
-fn spawn_mihomo_elevated(binary: &ResolvedBinary, config_dir: &Path) -> Result<u32, Error> {
+fn spawn_mihomo_elevated(binary: &Path, config_dir: &Path) -> Result<u32, Error> {
     let params = format!("-d \"{}\"", config_dir.to_string_lossy());
-    let handle = shell_run_elevated(&binary.cmd, &params)?;
+    let handle = shell_run_elevated(&binary.to_string_lossy(), &params)?;
     let pid = process_id_of(handle).ok_or(Error::Process("无法获取提权进程 PID".to_string()))?;
     if let Ok(mut slot) = ELEVATED_PROCESS.get_or_init(|| Mutex::new(None)).lock() {
         *slot = Some((pid, handle));
@@ -103,7 +103,7 @@ fn spawn_mihomo_elevated(binary: &ResolvedBinary, config_dir: &Path) -> Result<u
 }
 
 /// 提权启动；进程句柄缓存在本进程内（供停止时 TerminateProcess）
-pub(super) fn start_elevated(binary: &ResolvedBinary, config_dir: &Path) -> Result<u32, Error> {
+pub(super) fn start_elevated(binary: &Path, config_dir: &Path) -> Result<u32, Error> {
     spawn_mihomo_elevated(binary, config_dir)
 }
 
@@ -122,28 +122,17 @@ pub(super) fn is_pid_alive(pid: u32) -> bool {
     image_name(pid).is_some()
 }
 
-/// 扫描进程表：命令行含 config_dir 优先（与 unix 语义一致），镜像名比对为辅助兜底
-pub(super) fn find_mihomo_pid(binary: &ResolvedBinary, config_dir: &Path) -> Option<u32> {
-    let processes = all_processes()?;
-    for p in processes {
-        if matches_mihomo_info(&p.name, &p.cmdline, binary, config_dir) {
-            return Some(p.pid);
-        }
-    }
-    None
+/// 镜像名是否属于 mihomo（内嵌释放名为 `mihomo.exe`，兼容 winget 的
+/// `mihomo-windows-amd64.exe` 等命名）
+fn name_matches(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("mihomo")
 }
 
-struct ProcessInfo {
-    pid: u32,
-    name: String,
-    cmdline: String,
-}
-
-/// 一次枚举全部进程（PowerShell 5.1 CIM）
-fn all_processes() -> Option<Vec<ProcessInfo>> {
-    let script = "Get-CimInstance Win32_Process | Select-Object -Property ProcessId,Name,CommandLine | ConvertTo-Json -Compress";
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+/// 找到监听控制端口的 mihomo 进程（不区分是否由本程序启动）
+pub(super) fn find_mihomo_pid(settings: &Settings) -> Option<u32> {
+    let port = super::ctrl_port(&settings.mihomo_ctrl_addr)?;
+    let output = Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .output()
@@ -151,40 +140,27 @@ fn all_processes() -> Option<Vec<ProcessInfo>> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    // 单进程时 ConvertTo-Json 输出单个对象，多进程时为数组，统一包一层处理
-    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
-    let arr = match &value {
-        serde_json::Value::Array(a) => a.clone(),
-        serde_json::Value::Object(_) => vec![value],
-        _ => return None,
-    };
-    Some(
-        arr.into_iter()
-            .filter_map(|v| {
-                let pid = v.get("ProcessId")?.as_u64()? as u32;
-                let name = v.get("Name")?.as_str()?.to_string();
-                let cmdline = v
-                    .get("CommandLine")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Some(ProcessInfo { pid, name, cmdline })
-            })
-            .collect(),
-    )
+    let pid = parse_netstat_listen_pid(&String::from_utf8_lossy(&output.stdout), port)?;
+    // 只接受 mihomo 进程，避免误杀占用同一端口的其它程序
+    image_name(pid)
+        .is_some_and(|n| name_matches(&n))
+        .then_some(pid)
 }
 
-fn matches_mihomo_info(
-    name: &str,
-    cmdline: &str,
-    binary: &ResolvedBinary,
-    config_dir: &Path,
-) -> bool {
-    match config_dir.to_str() {
-        Some(dir) if !dir.is_empty() && cmdline.contains(dir) => true,
-        _ => name.eq_ignore_ascii_case(&mihomo_image_name(&binary.cmd)),
+/// 解析 `netstat -ano -p tcp`：返回本地端口为 `port` 的 LISTENING 行 PID
+fn parse_netstat_listen_pid(output: &str, port: u16) -> Option<u32> {
+    let suffix = format!(":{port}");
+    for line in output.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // 形如: TCP  127.0.0.1:19090  0.0.0.0:0  LISTENING  12345
+        if cols.len() < 5 || !cols[0].eq_ignore_ascii_case("TCP") || cols[3] != "LISTENING" {
+            continue;
+        }
+        if cols[1].ends_with(&suffix) {
+            return cols[4].parse().ok();
+        }
     }
+    None
 }
 
 fn image_name(pid: u32) -> Option<String> {
@@ -203,13 +179,6 @@ fn image_name(pid: u32) -> Option<String> {
         .split("\",\"")
         .next()
         .map(|s| s.to_string())
-}
-
-fn mihomo_image_name(mihomo_path: &str) -> String {
-    std::path::Path::new(mihomo_path)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| mihomo_path.to_string())
 }
 
 // ===== 停止 =====
@@ -269,56 +238,26 @@ fn taskkill(pid: u32) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::mihomo::binary::{BinarySource, ResolvedBinary};
 
-    fn binary(cmd: &str) -> ResolvedBinary {
-        ResolvedBinary {
-            cmd: cmd.to_string(),
-            source: BinarySource::Path,
-        }
+    #[test]
+    fn name_matches_mihomo_variants() {
+        assert!(name_matches("mihomo.exe"));
+        assert!(name_matches("MIHOMO-WINDOWS-AMD64.EXE"));
+        assert!(!name_matches("other.exe"));
+        assert!(!name_matches(""));
     }
 
     #[test]
-    fn cmdline_match_wins_over_image_name() {
-        // 回归：旧版/裸名解析出 "mihomo.exe"，但实际进程是 winget 包名，
-        // 只要命令行包含 config_dir 就应判定为本程序启动
-        let config_dir = Path::new(r"C:\Users\rimyn\AppData\Roaming\coclash");
-        assert!(matches_mihomo_info(
-            "mihomo-windows-amd64.exe",
-            r#""C:\...\mihomo-windows-amd64.exe" -d C:\Users\rimyn\AppData\Roaming\coclash"#,
-            &binary("mihomo.exe"),
-            config_dir,
-        ));
-    }
-
-    #[test]
-    fn image_name_fallback() {
-        let config_dir = Path::new(r"C:\Users\rimyn\AppData\Roaming\coclash");
-        // 命令行不含 config_dir 且镜像名不匹配 → false
-        assert!(!matches_mihomo_info(
-            "other.exe",
-            r"C:\other\other.exe -d C:\somewhere\else",
-            &binary("mihomo.exe"),
-            config_dir,
-        ));
-        // 镜像名匹配（忽略大小写）→ true
-        assert!(matches_mihomo_info(
-            "MIHOMO.EXE",
-            "",
-            &binary(r"C:\opt\mihomo.exe"),
-            config_dir,
-        ));
-    }
-
-    #[test]
-    fn empty_config_dir_does_not_match_everything() {
-        // 空 config_dir 时不能仅凭 contains("") 命中 cmdline 检查
-        let config_dir = Path::new("");
-        assert!(!matches_mihomo_info(
-            "other.exe",
-            "",
-            &binary("mihomo.exe"),
-            config_dir,
-        ));
+    fn parse_netstat_listening_pid() {
+        let output = "\
+  TCP    127.0.0.1:9090         0.0.0.0:0              LISTENING       3584
+  TCP    127.0.0.1:19090        0.0.0.0:0              LISTENING       12868
+  TCP    [::]:19090             [::]:0                 LISTENING       12868
+  TCP    127.0.0.1:7890         127.0.0.1:52344        ESTABLISHED     1
+";
+        assert_eq!(parse_netstat_listen_pid(output, 9090), Some(3584));
+        assert_eq!(parse_netstat_listen_pid(output, 19090), Some(12868));
+        assert_eq!(parse_netstat_listen_pid(output, 7890), None);
+        assert_eq!(parse_netstat_listen_pid("", 9090), None);
     }
 }

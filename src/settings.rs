@@ -20,7 +20,8 @@ pub struct Settings {
     pub provider_retry: u32,
     pub provider_retry_interval_ms: u64,
     pub poll_interval_ms: u64,
-    pub mihomo_exe: String,
+    /// 心跳间隔（毫秒）；0 = 关闭心跳
+    pub heartbeat_interval_ms: u64,
     pub channel_capacity: usize,
 }
 
@@ -35,7 +36,7 @@ impl Default for Settings {
             provider_retry: 6,
             provider_retry_interval_ms: 500,
             poll_interval_ms: 100,
-            mihomo_exe: String::new(),
+            heartbeat_interval_ms: 3000,
             channel_capacity: 16,
         }
     }
@@ -82,6 +83,11 @@ impl Settings {
     pub fn poll_interval(&self) -> Duration {
         Duration::from_millis(self.poll_interval_ms)
     }
+
+    /// 心跳间隔（0 由调用方处理为关闭）
+    pub fn heartbeat_interval(&self) -> Duration {
+        Duration::from_millis(self.heartbeat_interval_ms)
+    }
 }
 
 fn write_default(path: &Path, settings: &Settings) {
@@ -107,6 +113,10 @@ mod tests {
         assert_eq!(s.mihomo_ctrl_addr, "127.0.0.1:9999");
         assert_eq!(s.test_url, Settings::default().test_url);
         assert_eq!(s.poll_interval_ms, Settings::default().poll_interval_ms);
+        assert_eq!(
+            s.heartbeat_interval_ms,
+            Settings::default().heartbeat_interval_ms
+        );
         // P1-1 回归：API 地址由 ctrl 地址派生
         assert_eq!(s.api_url(), "http://127.0.0.1:9999");
     }

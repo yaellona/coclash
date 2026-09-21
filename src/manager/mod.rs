@@ -1,16 +1,27 @@
-//! 管理器层：持有共享数据（`Arc<Mutex<AppState>>`）与任务层（TaskRunner），提供命令面；不依赖 tui。
+//! 管理器层：持有共享数据与全部命令面；不依赖 tui。
+//!
+//! # 结构
+//!
+//! ```text
+//! Manager ──┬── state.rs    AppState（logs/config/mihomo 三块）
+//!           ├── commands.rs UI 副作用契约（Effect/ConfigChange）与统一入口 exec
+//!           ├── tasks.rs    用户触发的异步任务（impl Manager）
+//!           └── heartbeat.rs 心跳：定时同步 mihomo 运行时信息（impl Manager）
+//! ```
 //!
 //! # 线程模型
 //!
-//! - `AppState` 是唯一共享数据，后台任务直接读写（详见 `task` 模块的并发纪律）
-//! - TUI 层只读：通过 `state_lock()` 短暂持锁读取；修改一律走 Manager 命令或
-//!   `AppState` 方法（禁止在窗口里直接字段赋值，如 `st.select = ...`）
+//! - `Shared` 是唯一共享数据（`Arc<Shared>`），TUI 层只读（`state_lock`），
+//!   修改一律走 Manager 命令；后台任务直接读写 `Shared`（见 tasks/heartbeat 的并发纪律）。
+//! - 心跳是唯一的状态同步实现：外部启停 mihomo、外部切节点/改配置都会被心跳感知。
+pub mod commands;
+pub mod heartbeat;
 pub mod state;
-pub mod task;
+pub mod tasks;
 
 use crate::constants::{CONFIG_DIR_NAME, CONFIG_FILE, SETTINGS_FILE};
 use crate::core::config::mihomo_config::MihomoConfig;
-use crate::core::mihomo::{self, MihomoStatus};
+use crate::core::mihomo::{self, ApiClient, MihomoStatus};
 use crate::core::system_proxy::{disable_proxy, enable_proxy, get_proxy_status};
 use crate::error::Error;
 use crate::operation_log::{LogType, OperationLogs};
@@ -18,20 +29,50 @@ use crate::settings::Settings;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use tokio::sync::Notify;
 
-use state::AppState;
-use task::TaskRunner;
+use state::{AppState, MihomoState};
 
-/// 管理器：共享数据与任务的中枢，TUI 只通过它发命令与读状态。
-pub struct Manager {
-    /// 唯一共享数据（多线程可读可写）
-    pub state: Arc<Mutex<AppState>>,
+/// 共享数据：Manager 与后台任务（tasks/heartbeat）共享的单一结构。
+pub(crate) struct Shared {
+    pub state: Mutex<AppState>,
     pub settings: Settings,
     pub config_path: PathBuf,
+    pub api: ApiClient,
+    /// 重绘请求标志：状态变更置位，主循环消费后清零（dirty-flag 条件重绘）
+    pub redraw: AtomicBool,
     pub should_quit: AtomicBool,
-    tasks: TaskRunner,
-    /// 重绘请求标志：后台回灌/状态变更置位，主循环消费后清零（dirty-flag 条件重绘）
-    pub redraw: Arc<AtomicBool>,
+    /// 立即同步请求：`sync_now` 唤醒一次心跳并强制全量同步
+    pub sync_notify: Notify,
+    pub force_full: AtomicBool,
+}
+
+impl Shared {
+    /// 毒锁恢复的锁获取（后台任务统一入口）
+    pub fn lock(&self) -> MutexGuard<'_, AppState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn mark_redraw(&self) {
+        self.redraw.store(true, Ordering::Relaxed);
+    }
+
+    /// 请求立即同步一次（唤醒心跳并强制全量）
+    pub fn sync_now(&self) {
+        self.force_full.store(true, Ordering::Relaxed);
+        self.sync_notify.notify_one();
+    }
+
+    /// 后台任务日志：写操作记录并请求重绘
+    pub fn log(&self, log_type: LogType, msg: impl Into<String>) {
+        self.lock().logs.add_log(log_type, msg.into());
+        self.mark_redraw();
+    }
+}
+
+/// 管理器：共享数据与命令的中枢，TUI 只通过它发命令与读状态。
+pub struct Manager {
+    shared: Arc<Shared>,
 }
 
 impl Manager {
@@ -66,56 +107,72 @@ impl Manager {
                 }
             }
         };
-        let group_name = config.group_name().to_string();
+        let api = ApiClient::new(&settings, config.group_name())?;
 
-        let state = Arc::new(Mutex::new(AppState {
-            nodes: vec![],
-            select: 0,
-            active_node: None,
-            mihomo_status: MihomoStatus::Stopped,
-            proxy_running: false,
-            is_test_delay: false,
-            is_switching_node: false,
+        let state = Mutex::new(AppState {
             logs: OperationLogs::new(),
             config,
-        }));
+            mihomo: MihomoState::default(),
+        });
         {
             let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
-            st.mihomo_status = mihomo::detect_status(&settings, &config_dir);
-            st.proxy_running = get_proxy_status().is_ok_and(|(v, _)| v == 1);
+            st.mihomo.status = mihomo::detect_status(&settings);
+            st.mihomo.proxy_running = get_proxy_status().is_ok_and(|(v, _)| v == 1);
         }
 
-        let redraw = Arc::new(AtomicBool::new(true));
-        let tasks = TaskRunner::new(
-            &settings,
-            config_path.clone(),
-            &group_name,
-            state.clone(),
-            redraw.clone(),
-        )?;
-
         Ok(Self {
-            state,
-            settings,
-            config_path,
-            should_quit: AtomicBool::new(false),
-            tasks,
-            redraw,
+            shared: Arc::new(Shared {
+                state,
+                settings,
+                config_path,
+                api,
+                redraw: AtomicBool::new(true),
+                should_quit: AtomicBool::new(false),
+                sync_notify: Notify::new(),
+                force_full: AtomicBool::new(false),
+            }),
         })
     }
 
+    /// 后台任务捕获用（tasks/heartbeat 在同一 crate 内）
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.shared.settings
+    }
+
     pub fn config_dir(&self) -> &Path {
-        self.config_path.parent().unwrap_or(Path::new("."))
+        self.shared.config_path.parent().unwrap_or(Path::new("."))
     }
 
     /// 毒锁恢复的锁获取（全项目统一入口）
     pub fn state_lock(&self) -> MutexGuard<'_, AppState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.shared.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// 标记需要重绘（状态变更的统一信号，主循环消费后清零）
-    fn mark_redraw(&self) {
-        self.redraw.store(true, Ordering::Relaxed);
+    pub fn mark_redraw(&self) {
+        self.shared.redraw.store(true, Ordering::Relaxed);
+    }
+
+    /// 主循环消费重绘标志
+    pub fn take_redraw(&self) -> bool {
+        self.shared.redraw.swap(false, Ordering::Relaxed)
+    }
+
+    /// 请求立即同步一次（唤醒心跳并强制全量，`r` 键与启动后触发）
+    pub fn sync_now(&self) {
+        self.shared.sync_now();
+    }
+
+    pub fn request_quit(&self) {
+        self.shared.should_quit.store(true, Ordering::Relaxed);
+    }
+
+    pub fn quit_requested(&self) -> bool {
+        self.shared.should_quit.load(Ordering::Relaxed)
     }
 
     // ===== 日志 =====
@@ -148,24 +205,26 @@ impl Manager {
         r
     }
 
-    /// 配置落盘（序列化在锁内、写盘在锁外），成功后由调用方决定是否重载
+    /// 配置落盘（锁内克隆、锁外序列化 + 写盘），成功后由调用方决定是否重载
     pub fn save_config(&self) -> Result<(), Error> {
-        self.tasks.save_config()
+        tasks::write_config(&self.shared)
     }
 
     // ===== 命令（同步，按键直接触发） =====
 
     pub fn start_mihomo(&self) {
-        let elevate = self.state_lock().tun_enabled();
-        match mihomo::start_mihomo(&self.settings, &self.config_path, elevate) {
+        // Windows 上只要启动 mihomo 就请求管理员权限（TUN 或普通代理都提权）
+        let elevate = cfg!(windows);
+        match mihomo::start_mihomo(&self.shared.settings, &self.shared.config_path, elevate) {
             Ok((pid, binary)) => {
-                self.state_lock().mihomo_status = MihomoStatus::RunningByUs(pid);
+                self.state_lock().mihomo.status = MihomoStatus::Running(pid);
                 self.log(format!(
-                    "mihomo 已启动 (PID {pid}, {}: {})",
-                    binary.source.label(),
-                    binary.cmd
+                    "mihomo 已启动 (PID {pid}, 内嵌 {}: {})",
+                    mihomo::embedded::VERSION,
+                    binary.display()
                 ));
-                self.tasks.wait_for_start();
+                // 立即同步：端口就绪后心跳会拉取节点与运行时信息
+                self.sync_now();
                 self.mark_redraw();
             }
             Err(e) => self.log_err(e),
@@ -173,10 +232,9 @@ impl Manager {
     }
 
     pub fn stop_mihomo(&self) {
-        let config_dir = self.config_dir().to_path_buf();
-        match mihomo::stop_mihomo(&self.settings, &config_dir) {
+        match mihomo::stop_mihomo(self.settings()) {
             Ok(()) => {
-                self.state_lock().mihomo_status = MihomoStatus::Stopped;
+                self.state_lock().mihomo.status = MihomoStatus::Stopped;
                 self.log("已停止mihomo");
                 self.mark_redraw();
             }
@@ -184,11 +242,12 @@ impl Manager {
         }
     }
 
+    /// 直接按端口启停：端口可达 = 运行中 → 停止；否则启动（不判断归属）
     pub fn toggle_mihomo(&self) {
-        let config_dir = self.config_dir().to_path_buf();
-        match mihomo::detect_status(&self.settings, &config_dir) {
-            MihomoStatus::Stopped => self.start_mihomo(),
-            _ => self.stop_mihomo(),
+        if mihomo::is_port_up(self.settings()) {
+            self.stop_mihomo();
+        } else {
+            self.start_mihomo();
         }
     }
 
@@ -196,7 +255,7 @@ impl Manager {
         let is_enabled = get_proxy_status()
             .map(|(code, _)| code == 1)
             .unwrap_or(false);
-        self.state_lock().proxy_running = !is_enabled;
+        self.state_lock().mihomo.proxy_running = !is_enabled;
         self.mark_redraw();
         if is_enabled {
             match disable_proxy() {
@@ -214,17 +273,10 @@ impl Manager {
 
     pub fn toggle_tun(&self) {
         let new_state = !self.state_lock().tun_enabled();
-        self.edit_config(|c| c.set_tun_enabled(new_state));
+        // 与设置页 TUN 字段共用同一份配置逻辑（commands::ConfigChange::Tun）
+        self.apply_config(commands::ConfigChange::Tun(new_state));
         self.log(format!("TUN已{}", if new_state { "开启" } else { "关闭" }));
-        #[cfg(unix)]
-        if new_state && let Some(warn) = mihomo::tun_capability_warning() {
-            self.log_warn(warn);
-        }
-        if let Err(e) = self.save_config() {
-            self.log_err(e);
-            return;
-        }
-        self.reload_config();
+        self.save_and_reload();
     }
 
     pub fn switch_provider(&self, name: String) {
@@ -235,35 +287,9 @@ impl Manager {
         match result {
             Ok(()) => {
                 self.log("正在切换订阅...");
-                if let Err(e) = self.save_config() {
-                    self.log_err(e);
-                    return;
-                }
-                self.reload_config();
+                self.save_and_reload();
             }
             Err(e) => self.log_err(e),
         }
-    }
-
-    // ===== 任务发起（一行转发，任务逻辑在 manager/task.rs） =====
-
-    pub fn switch_node(&self, index: usize) {
-        self.tasks.switch_node(index);
-    }
-
-    pub fn start_delay_test(&self) {
-        self.tasks.start_delay_test();
-    }
-
-    pub fn load_nodes(&self) {
-        self.tasks.load_nodes();
-    }
-
-    pub fn reload_config(&self) {
-        self.tasks.reload_config();
-    }
-
-    pub fn insert_sub(&self, url: String) {
-        self.tasks.insert_sub(url);
     }
 }

@@ -1,48 +1,52 @@
-//! mihomo 进程管理：进程表扫描、端口/状态探测、启动/停止。
+//! mihomo 进程管理：端口/状态探测、启动/停止。
 //!
 //! 平台差异收敛在 `platform` 子模块（`windows`/`unix` 二选一，见各文件顶部文档）：
-//! 各平台只实现「探测与启动/终止」的最小差异，公共流程（进程表扫描、状态判定、
+//! 各平台只实现「探测与启动/终止」的最小差异，公共流程（状态判定、
 //! 日志重定向、SIGTERM→SIGKILL 语义）保持在本模块，双平台行为一致。
 //!
-//! 运行状态判定不依赖任何文件记录：通过扫描系统进程表找出命令行含本程序
-//! `config_dir` 的 mihomo 进程，即为 RunningByUs；仅端口可达则为 External。
+//! mihomo 可执行文件来自**内嵌**（`super::embedded`）：启动前释放到缓存目录。
+//! 运行状态只看控制端口是否可达（不区分是否由本程序启动）；停止时按控制端口
+//! 找到属主 mihomo 并结束，因此外部启动的实例也能直接关闭，且不会误杀其它实例。
 use crate::constants::MIHOMO_LOG_FILE;
 use crate::error::Error;
 use crate::settings::Settings;
 use std::fs::OpenOptions;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use super::binary::{ResolvedBinary, resolve_mihomo_exe};
+use super::embedded;
 
-#[cfg(windows)]
-mod windows;
 #[cfg(unix)]
 mod unix;
+#[cfg(windows)]
+mod windows;
 
+#[cfg(unix)]
+use unix as platform;
 /// 当前平台实现（二选一）
 #[cfg(windows)]
 use windows as platform;
-#[cfg(unix)]
-use unix as platform;
 
 // ===== mihomo 运行状态 =====
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MihomoStatus {
     Stopped,
-    /// 运行中且命令行包含本程序 config_dir（判定方式：进程表扫描，无文件记录）
-    RunningByUs(u32),
-    /// 端口被占用但未找到匹配本 config_dir 的 mihomo 进程（外部启动的实例）
-    External,
+    /// 运行中；PID 为 0 表示未记录（端口探测发现，仅展示「运行中」）
+    Running(u32),
 }
 
 // ===== 端口 / 进程探测 =====
 
 pub fn is_port_up(settings: &Settings) -> bool {
     ctrl_addr_up(&settings.mihomo_ctrl_addr)
+}
+
+/// 从 external-controller 地址取控制端口（兼容 `127.0.0.1:9090` 与 `:9090`）
+pub fn ctrl_port(addr: &str) -> Option<u16> {
+    addr.rsplit_once(':').and_then(|(_, p)| p.parse().ok())
 }
 
 pub fn ctrl_addr_up(addr: &str) -> bool {
@@ -70,15 +74,10 @@ pub fn is_pid_alive(pid: u32) -> bool {
     platform::is_pid_alive(pid)
 }
 
-/// 扫描进程表判断当前状态：命令行含本程序 config_dir 的 mihomo 进程 → RunningByUs；
-/// 仅端口可达 → External；否则 Stopped。不依赖任何文件记录。
-pub fn detect_status(settings: &Settings, config_dir: &Path) -> MihomoStatus {
-    let binary = resolve_mihomo_exe(settings);
-    if let Some(pid) = platform::find_mihomo_pid(&binary, config_dir) {
-        return MihomoStatus::RunningByUs(pid);
-    }
+/// 当前状态只看控制端口：可达 = 运行中（PID 未知，置 0），否则停止。
+pub fn detect_status(settings: &Settings) -> MihomoStatus {
     if is_port_up(settings) {
-        MihomoStatus::External
+        MihomoStatus::Running(0)
     } else {
         MihomoStatus::Stopped
     }
@@ -86,13 +85,14 @@ pub fn detect_status(settings: &Settings, config_dir: &Path) -> MihomoStatus {
 
 // ===== mihomo 进程管理 =====
 
-/// 启动 mihomo。`elevate` 仅 Windows 生效（UAC 提权启动）。
+/// 启动内嵌 mihomo。`elevate` 仅 Windows 生效（UAC 提权启动）。
+/// 返回 (PID, 释放后的可执行文件路径)。
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub fn start_mihomo(
     settings: &Settings,
     config_path: &Path,
     elevate: bool,
-) -> Result<(u32, ResolvedBinary), Error> {
+) -> Result<(u32, PathBuf), Error> {
     let config_dir = config_path
         .parent()
         .ok_or(Error::Process("无法获取配置目录".to_string()))?;
@@ -102,7 +102,8 @@ pub fn start_mihomo(
         ));
     }
 
-    let binary = resolve_mihomo_exe(settings);
+    // 唯一来源：释放内嵌 mihomo 到缓存目录
+    let binary = embedded::ensure_extracted()?;
 
     #[cfg(windows)]
     if elevate {
@@ -115,8 +116,8 @@ pub fn start_mihomo(
 }
 
 /// 普通（非提权）启动：日志重定向 + 平台分离会话配置
-fn spawn_detached(binary: &ResolvedBinary, config_dir: &Path) -> Result<u32, Error> {
-    let mut cmd = Command::new(&binary.cmd);
+fn spawn_detached(binary: &Path, config_dir: &Path) -> Result<u32, Error> {
+    let mut cmd = Command::new(binary);
     cmd.args([
         "-d",
         config_dir
@@ -144,16 +145,10 @@ fn spawn_detached(binary: &ResolvedBinary, config_dir: &Path) -> Result<u32, Err
     Ok(child.id())
 }
 
-/// 只停止匹配本 config_dir 的 mihomo 进程（进程表扫描定位）；外部实例（命令行不含
-/// config_dir）拒绝操作
-pub fn stop_mihomo(settings: &Settings, config_dir: &Path) -> Result<(), Error> {
-    let binary = resolve_mihomo_exe(settings);
-    let pid = platform::find_mihomo_pid(&binary, config_dir).ok_or_else(|| {
-        Error::Process(
-            "未找到运行中的 mihomo（进程不存在或不是本配置目录启动的）；若是外部启动的实例，请自行关闭"
-                .to_string(),
-        )
-    })?;
+/// 停止 mihomo：按控制端口找到属主进程（不区分是否由本程序启动），找不到则报错
+pub fn stop_mihomo(settings: &Settings) -> Result<(), Error> {
+    let pid = platform::find_mihomo_pid(settings)
+        .ok_or_else(|| Error::Process("未找到监听控制端口的 mihomo 进程".to_string()))?;
     kill_pid(pid)
 }
 

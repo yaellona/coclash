@@ -1,8 +1,7 @@
-//! Unix 平台实现：setsid 分离会话、SIGTERM→SIGKILL 信号终止、/proc 进程探测。
-use super::super::binary::ResolvedBinary;
+//! Unix 平台实现：setsid 分离会话、SIGTERM→SIGKILL 信号终止、/proc 进程与端口探测。
 use crate::error::Error;
+use crate::settings::Settings;
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -29,23 +28,60 @@ pub(super) fn is_pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
-/// 判定依据：命令行包含 config_dir（与 windows 语义一致）
-pub(super) fn find_mihomo_pid(_binary: &ResolvedBinary, config_dir: &Path) -> Option<u32> {
-    let dir = config_dir.to_str().unwrap_or("");
-    if dir.is_empty() {
-        return None;
+/// 找到监听控制端口的 mihomo 进程（不区分是否由本程序启动）
+pub(super) fn find_mihomo_pid(settings: &Settings) -> Option<u32> {
+    let port = super::ctrl_port(&settings.mihomo_ctrl_addr)?;
+    let inode = listening_socket_inode(port)?;
+    find_mihomo_pid_by_inode(&inode)
+}
+
+/// 从 `/proc/net/tcp{,6}` 找 LISTEN（状态 0A）且本地端口匹配的 socket inode
+fn listening_socket_inode(port: u16) -> Option<String> {
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        for line in content.lines().skip(1) {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() < 10 || cols[3] != "0A" {
+                continue;
+            }
+            let Some((_, hex_port)) = cols[1].rsplit_once(':') else {
+                continue;
+            };
+            if u16::from_str_radix(hex_port, 16).ok() == Some(port) {
+                return Some(cols[9].to_string());
+            }
+        }
     }
+    None
+}
+
+/// 在 `comm == "mihomo"` 的进程里找持有该 socket inode 的 PID
+fn find_mihomo_pid_by_inode(inode: &str) -> Option<u32> {
+    let needle = format!("socket:[{inode}]");
     for entry in fs::read_dir("/proc").ok()?.flatten() {
         let pid: u32 = match entry.file_name().to_string_lossy().parse() {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let cmdline = match fs::read(entry.path().join("cmdline")) {
+        let base = entry.path();
+        let comm = match fs::read_to_string(base.join("comm")) {
             Ok(c) => c,
             Err(_) => continue,
         };
-        if String::from_utf8_lossy(&cmdline).contains(dir) {
-            return Some(pid);
+        if comm.trim() != "mihomo" {
+            continue;
+        }
+        let Ok(fds) = fs::read_dir(base.join("fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            if let Ok(target) = fs::read_link(fd.path())
+                && target.to_string_lossy() == needle
+            {
+                return Some(pid);
+            }
         }
     }
     None
@@ -73,37 +109,30 @@ pub(super) fn kill_pid(pid: u32) -> Result<(), Error> {
     Ok(())
 }
 
-// ===== 查找 mihomo PID（TUN 权限检查用）=====
+// ===== TUN 权限检查 =====
 
-fn find_any_mihomo_pid(config_dir: &str) -> Option<u32> {
+/// 任意一个 mihomo 进程（用于 TUN capabilities 检查）
+fn find_any_mihomo_pid() -> Option<u32> {
     for entry in fs::read_dir("/proc").ok()?.flatten() {
         let pid: u32 = match entry.file_name().to_string_lossy().parse() {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let base = entry.path();
-        let comm = match fs::read_to_string(base.join("comm")) {
-            Ok(c) => c.trim().to_string(),
+        let comm = match fs::read_to_string(entry.path().join("comm")) {
+            Ok(c) => c,
             Err(_) => continue,
         };
-        if comm != "mihomo" {
-            continue;
-        }
-        if config_dir.is_empty() {
-            return Some(pid);
-        }
-        if let Ok(cmdline) = fs::read(base.join("cmdline"))
-            && String::from_utf8_lossy(&cmdline).contains(config_dir)
-        {
+        if comm.trim() == "mihomo" {
             return Some(pid);
         }
     }
     None
 }
 
-/// TUN 权限检查：mihomo 进程缺少 CAP_NET_ADMIN/CAP_NET_RAW 时给出提示
+/// TUN 权限检查：mihomo 进程缺少 CAP_NET_ADMIN/CAP_NET_RAW 时给出提示。
+/// 内嵌 mihomo 释放到用户缓存目录，不带文件 capabilities，需要用户手动 setcap。
 pub fn tun_capability_warning() -> Option<String> {
-    let pid = find_any_mihomo_pid("")?;
+    let pid = find_any_mihomo_pid()?;
     let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let cap_eff = status.lines().find_map(|l| {
         l.strip_prefix("CapEff:\t")
@@ -112,10 +141,16 @@ pub fn tun_capability_warning() -> Option<String> {
     const CAP_NET_ADMIN: u64 = 1 << 12;
     const CAP_NET_RAW: u64 = 1 << 13;
     if cap_eff & (CAP_NET_ADMIN | CAP_NET_RAW) == (CAP_NET_ADMIN | CAP_NET_RAW) {
-        None
-    } else {
-        Some(format!(
-            "mihomo(PID={pid})缺少CAP_NET_ADMIN/CAP_NET_RAW，TUN可能起不来。请用NixOS security.wrappers或setcap授权"
-        ))
+        return None;
     }
+    let hint = match crate::core::mihomo::embedded::ensure_extracted() {
+        Ok(bin) => format!(
+            "请执行一次: sudo setcap cap_net_admin,cap_net_raw+eip {}",
+            bin.display()
+        ),
+        Err(_) => "请用 setcap 给 mihomo 授予 CAP_NET_ADMIN/CAP_NET_RAW".to_string(),
+    };
+    Some(format!(
+        "mihomo(PID={pid})缺少CAP_NET_ADMIN/CAP_NET_RAW，TUN可能起不来。{hint}"
+    ))
 }

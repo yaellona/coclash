@@ -6,6 +6,22 @@ pub fn display_width(s: &str) -> usize {
     s.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
 }
 
+/// 字节数格式化为可读文本（B/KB/MB/GB，一位小数）
+pub fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes}B")
+    } else {
+        format!("{value:.1}{}", UNITS[unit])
+    }
+}
+
 /// 选择下标环绕：`select` 以 `len` 为模移动 `step`（负步长向前，正步长向后）。
 /// 调用方需保证 `len > 0`（列表为空时先短路）。
 pub fn wrap_index(select: usize, len: usize, step: i32) -> usize {
@@ -76,6 +92,16 @@ mod tests {
         assert_eq!(display_width("SOCKS 端口"), 10);
         assert_eq!(display_width("混合端口"), 8);
         assert_eq!(display_width("abc"), 3);
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0B");
+        assert_eq!(format_bytes(1023), "1023B");
+        assert_eq!(format_bytes(1024), "1.0KB");
+        assert_eq!(format_bytes(1536), "1.5KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0GB");
     }
 
     #[test]

@@ -1,10 +1,10 @@
 //! mihomo 进程日志窗口：tail 读取 + 统一 Scroller 滚动，长行自动换行。
-use crate::manager::Manager;
-use crate::constants::MIHOMO_LOG_FILE;
-use crate::tui::Page;
+use crate::manager::state::AppState;
+use crate::tui::action::{Binding, KeyPattern};
+use crate::tui::cmd::Cmd;
 use crate::tui::layout::wrap_lines;
+use crate::tui::page::Page;
 use crate::tui::scroll::Scroller;
-use crate::window;
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
@@ -17,7 +17,7 @@ use std::path::PathBuf;
 const MAX_TAIL_BYTES: u64 = 128 * 1024;
 const MAX_TAIL_LINES: usize = 500;
 
-pub struct MihomoLogWindow {
+pub struct MihomoLogPage {
     path: PathBuf,
     /// 原始行
     lines: Vec<String>,
@@ -31,11 +31,10 @@ pub struct MihomoLogWindow {
     last_width: usize,
 }
 
-#[window]
-impl MihomoLogWindow {
-    pub fn new(manager: &Manager) -> Self {
+impl MihomoLogPage {
+    pub fn new(path: PathBuf) -> Self {
         Self {
-            path: manager.config_dir().join(MIHOMO_LOG_FILE),
+            path,
             lines: vec![],
             rows: vec![],
             scroller: Scroller::new(),
@@ -44,8 +43,6 @@ impl MihomoLogWindow {
             last_width: 0,
         }
     }
-
-    pub fn on_open(&mut self) {}
 
     /// 文件有更新时重新读取尾部，跟随模式自动滚到底部；返回是否更新
     fn refresh(&mut self) -> bool {
@@ -58,35 +55,30 @@ impl MihomoLogWindow {
         true
     }
 
-    #[key(KeyCode::Esc, "关闭", footer = false)]
-    fn close(&mut self, _manager: &Manager) -> Option<Page> {
-        Some(Page::Main)
+    fn close(&mut self, _: &AppState) -> Cmd {
+        Cmd::back()
     }
 
-    #[key(KeyCode::Up, "导航", footer = false)]
-    fn up(&mut self, _manager: &Manager) -> Option<Page> {
+    fn up(&mut self, _: &AppState) -> Cmd {
         self.scroller.up();
-        None
+        Cmd::none()
     }
 
-    #[key(KeyCode::Down, "导航", footer = false)]
-    fn down(&mut self, _manager: &Manager) -> Option<Page> {
+    fn down(&mut self, _: &AppState) -> Cmd {
         let total = self.rows.len();
         self.scroller.down(total);
-        None
+        Cmd::none()
     }
 
-    #[key(KeyCode::PageUp, "翻页", footer = false)]
-    fn page_up(&mut self, _manager: &Manager) -> Option<Page> {
+    fn page_up(&mut self, _: &AppState) -> Cmd {
         self.scroller.page_up(self.visible);
-        None
+        Cmd::none()
     }
 
-    #[key(KeyCode::PageDown, "翻页", footer = false)]
-    fn page_down(&mut self, _manager: &Manager) -> Option<Page> {
+    fn page_down(&mut self, _: &AppState) -> Cmd {
         let total = self.rows.len();
         self.scroller.page_down(total, self.visible);
-        None
+        Cmd::none()
     }
 
     /// 每帧渲染前调用：读文件更新 + 折行 + 收敛滚动。
@@ -100,8 +92,28 @@ impl MihomoLogWindow {
         }
         self.scroller.clamp(self.rows.len());
     }
+}
 
-    pub fn draw(&mut self, _manager: &Manager, f: &mut Frame) {
+impl Page for MihomoLogPage {
+    const BINDINGS: &'static [Binding<Self>] = &[
+        Binding::on(KeyPattern::Code(KeyCode::Esc), "关闭", false, Self::close),
+        Binding::on(KeyPattern::Code(KeyCode::Up), "导航", false, Self::up),
+        Binding::on(KeyPattern::Code(KeyCode::Down), "导航", false, Self::down),
+        Binding::on(
+            KeyPattern::Code(KeyCode::PageUp),
+            "翻页",
+            false,
+            Self::page_up,
+        ),
+        Binding::on(
+            KeyPattern::Code(KeyCode::PageDown),
+            "翻页",
+            false,
+            Self::page_down,
+        ),
+    ];
+
+    fn draw(&mut self, _state: &AppState, f: &mut Frame) {
         let area = f.area();
         let block = Block::default()
             .title("mihomo 进程日志 (Esc 关闭, ↑↓/PgUp/PgDn 滚动)")

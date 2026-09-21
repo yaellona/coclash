@@ -10,6 +10,8 @@
 
 ## 安装
 
+`coclash` **自带 mihomo**（构建期压缩嵌入，运行时释放到缓存目录），无需预装任何东西。
+
 ### windows
 
 先留个`todo`暂时没做安装脚本喵。
@@ -25,7 +27,7 @@ imports = [ inputs.coclash.nixosModules.default ];
 programs.coclash.enable = true;
 ```
 
-`enable` 后默认会给mihomo提供sudo权限，不需要再`sudo`给`coclash`了。
+`enable` 只安装 coclash 本身：mihomo 内嵌在二进制里，不再依赖 nixpkgs 的 mihomo，也不需要 `security.wrappers`。
 
 ### archlinux以及其他发行版
 
@@ -35,6 +37,24 @@ programs.coclash.enable = true;
 
 首次进入`coclash`的时候，`mihomo`启动了≠能用了，如果发现读取`mihomo`端口失败了，说明`mihomo`还没有下载`GeoSite`数据库，需要等待一段时间下载数据库。
 
+### 内嵌 mihomo
+
+- 版本固定在 `mihomo.lock`，构建时自动取用（优先 `vendor/mihomo/<target>/mihomo[.exe]`，没有才下载并解压到该目录；`COCLASH_EMBED_MIHOMO` 可指定构建期来源，供 Nix/离线构建使用）。
+- 运行时释放到 `{cache_dir}/coclash/bin/<sha8>/mihomo[.exe]`（Windows 为 `%LOCALAPPDATA%`），存在即复用；`COCLASH_MIHOMO_DIR` 可改缓存根。
+- 更新 mihomo：改 `mihomo.lock` 的版本/资产/哈希后重新编译（`vendor/mihomo/` 下对应文件需删除）。
+- 不需要内嵌时可用 `cargo build --no-default-features`（此时无法启动 mihomo）。
+- 内嵌的 mihomo 以 GPL-3.0 分发，许可证见 [assets/licenses/mihomo-GPL-3.0.txt](./assets/licenses/mihomo-GPL-3.0.txt)，源码：<https://github.com/MetaCubeX/mihomo>。
+
+### Linux TUN 权限
+
+内嵌 mihomo 释放到用户缓存目录，不带文件 capabilities。需要 TUN 时按 TUI 日志提示执行一次：
+
+```bash
+sudo setcap cap_net_admin,cap_net_raw+eip ~/.cache/coclash/bin/<sha8>/mihomo
+```
+
+（缓存路径含内容哈希，升级内嵌版本后需要对新路径重新授权。）
+
 ### Geo 数据源
 
 GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net`）下载，可在 `{config_dir}/coclash/config.yaml` 的 `geox-url` 字段自行更换（`geoip` / `geosite` / `mmdb` 三个键）。
@@ -42,13 +62,51 @@ GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net
 ### 进程管理
 
 - TUI 关闭时**不会**杀掉 mihomo 进程（进程与 TUI 解耦）。
-- mihomo 运行状态不依赖任何文件记录，而是**直接扫描系统进程表**：找到命令行含 `{config_dir}/coclash` 的 mihomo 进程即视为运行中；按 `s` 停止时也只停止匹配该 config_dir 的实例，外部启动（命令行不含本 config_dir）的不会被误杀，需自行关闭。
+- 运行状态**只看控制端口是否可达**，不区分实例由谁启动；按 `s` 直接启停：
+  端口可达 → 停止（按控制端口找到属主 mihomo 进程结束），否则 → 启动内嵌 mihomo。
+- 停止按「控制端口属主」定位，不会误杀监听其它端口的 mihomo；若端口被非 mihomo 程序占用，
+  停止会报「未找到监听控制端口的 mihomo 进程」，启动则报端口占用。
 - 启动失败但进程残留时（端口未就绪），仍可按 `s` 停止。
 - mihomo 进程的 stdout/stderr 会写入 `{config_dir}/coclash/mihomo.log`，按 `l` 可在 TUI 内查看。
 
+### 心跳同步
+
+TUI 常驻一个心跳任务（快路径默认 3 秒一次，`settings.json` 的 `heartbeat_interval_ms` 可改，0 = 关闭）：
+
+- **快路径（每 tick）**：端口探测、系统代理状态、累计流量（`/connections`）。
+- **全量（每 10 tick ≈ 30s）**：额外同步内核版本（`/version`）、模式/端口/TUN/DNS（`/configs`）、
+  节点列表与当前节点（`/proxies/{group}`）；按 `r` 可立即触发一次全量，无需等待。
+- 端口可达/不可达的跃迁会更新运行状态（不扫描进程表，不做实例归属判断）。
+- API 连续失败时按指数退避重试（最多 8 倍周期）；就绪/断开日志各只记一次。
+- 状态面板优先显示运行时信息，停止时回落到本地 `config.yaml`；设置页仍只编辑本地配置，
+  与运行中不一致时以灰色 `（运行时: X）` 提示。
+- 节点列表刷新按名字保留测速结果。
+
 ### mihomo API
 
-TUI 通过 mihomo 的 external-controller RESTful API 交互（拉取节点、测速、切换节点/订阅、重载配置），接口与错误语义见 [mihomo-api.md](./mihomo-api.md)。
+TUI 通过 mihomo 的 external-controller RESTful API 交互（心跳同步、测速、切换节点/订阅、重载配置），接口与错误语义见 [mihomo-api.md](./mihomo-api.md)。
+
+## 代码结构
+
+```
+src/
+├── main.rs        入口：终端初始化 + 事件循环
+├── core/          与 mihomo 的纯 IO（RESTful API、进程、config.yaml、系统代理）
+├── manager/       共享状态与命令层
+│   ├── state.rs       AppState { logs, config, mihomo }
+│   ├── commands.rs    副作用契约 Effect/ConfigChange 与 Manager::exec
+│   ├── tasks.rs       用户触发的异步任务
+│   └── heartbeat.rs   心跳：唯一的状态同步实现
+└── tui/           绘制与按键
+    ├── cmd.rs         页面动作 Cmd（导航 Nav + 副作用 Effect）
+    ├── action.rs      按键绑定（快捷键 + 执行函数 + 描述）
+    ├── page.rs        页面接口 Page（只读 AppState，返回 Cmd）
+    └── pages/         各页面 + 手写注册表（无过程宏）
+```
+
+新增页面：在 `tui/pages/` 新建文件实现 `Page`（`BINDINGS` + `draw`），
+再在 `pages/mod.rs` 登记 `PageId` 变体与 `slots.insert(...)` 即可；
+按键、帮助与底部栏文案全部由 `BINDINGS` 自动生成。
 
 ## 界面展示
 
@@ -63,7 +121,7 @@ TUI 通过 mihomo 的 external-controller RESTful API 交互（拉取节点、�
 ## TODO
 
 1. ~~添加tun模式。~~
-2. 提供mihomo自动安装方案。(至少nixos实现了不是吗🤣)
+2. ~~提供mihomo自动安装方案。~~（构建期内嵌 + 运行时释放，见「内嵌 mihomo」）
 3. ~~打nix包。~~
 4. ~~静默启动。~~
 5. ~~mihomo的进程和tui解耦，关闭tui不关闭mihomo~~

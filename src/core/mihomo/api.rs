@@ -3,6 +3,7 @@ use crate::constants::DEFAULT_GROUP;
 use crate::error::Error;
 use crate::settings::Settings;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -22,6 +23,44 @@ pub struct ProxyReport {
     pub now: String,
     #[serde(rename = "type")]
     pub node_type: String,
+}
+
+/// `/version` 响应（心跳展示内核版本）
+#[derive(Debug, Deserialize)]
+pub struct VersionReport {
+    #[serde(default)]
+    pub version: String,
+}
+
+/// `/configs` 响应（心跳只取运行时展示需要的字段）
+#[derive(Debug, Deserialize)]
+pub struct ConfigsReport {
+    #[serde(rename = "mixed-port", default)]
+    pub mixed_port: u16,
+    #[serde(rename = "socks-port", default)]
+    pub socks_port: u16,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub tun: Option<EnableReport>,
+    #[serde(default)]
+    pub dns: Option<EnableReport>,
+}
+
+/// 带 `enable` 字段的子配置（tun/dns 共用）
+#[derive(Debug, Deserialize)]
+pub struct EnableReport {
+    #[serde(default)]
+    pub enable: bool,
+}
+
+/// `/connections` 响应（心跳只取累计流量，连接明细忽略）
+#[derive(Debug, Deserialize)]
+pub struct ConnectionsReport {
+    #[serde(rename = "uploadTotal", default)]
+    pub upload_total: u64,
+    #[serde(rename = "downloadTotal", default)]
+    pub download_total: u64,
 }
 
 pub struct ApiClient {
@@ -55,8 +94,9 @@ impl ApiClient {
         })
     }
 
-    pub async fn get_proxy(&self) -> Result<ProxyReport, Error> {
-        let url = format!("{}/proxies/{}", self.base_url, self.group);
+    /// GET + JSON 反序列化（统一超时与错误文案）
+    async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
+        let url = format!("{}{path}", self.base_url);
         let body = self
             .client
             .get(url)
@@ -67,14 +107,31 @@ impl ApiClient {
             .text()
             .await
             .map_err(|e| Error::Api(format!("读取响应失败: {e}")))?;
-        serde_json::from_str(&body).map_err(|e| Error::Api(format!("解析节点失败: {e}")))
+        serde_json::from_str(&body).map_err(|e| Error::Api(format!("解析响应失败: {e}")))
+    }
+
+    pub async fn get_proxy(&self) -> Result<ProxyReport, Error> {
+        self.get_json(&format!("/proxies/{}", self.group)).await
+    }
+
+    pub async fn get_version(&self) -> Result<VersionReport, Error> {
+        self.get_json("/version").await
+    }
+
+    pub async fn get_configs(&self) -> Result<ConfigsReport, Error> {
+        self.get_json("/configs").await
+    }
+
+    pub async fn get_connections(&self) -> Result<ConnectionsReport, Error> {
+        self.get_json("/connections").await
     }
 
     pub async fn fetch_delays(&self) -> Result<HashMap<String, u32>, Error> {
-        let url = format!(
-            "{}/group/{}/delay?timeout={}&url={}",
-            self.base_url, self.group, self.delay_timeout_ms, self.test_url
+        let path = format!(
+            "/group/{}/delay?timeout={}&url={}",
+            self.group, self.delay_timeout_ms, self.test_url
         );
+        let url = format!("{}{path}", self.base_url);
         let body = self
             .client
             .get(url)
@@ -126,5 +183,47 @@ impl ApiClient {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_configs_report_partial() {
+        // /configs 字段缺失时用默认值，不整段解析失败
+        let cfg: ConfigsReport = serde_json::from_str(r#"{"mode":"rule"}"#).unwrap();
+        assert_eq!(cfg.mode, "rule");
+        assert_eq!(cfg.mixed_port, 0);
+        assert!(cfg.tun.is_none());
+    }
+
+    #[test]
+    fn test_configs_report_full() {
+        let cfg: ConfigsReport = serde_json::from_str(
+            r#"{"mixed-port":7890,"socks-port":7891,"mode":"global","tun":{"enable":true},"dns":{"enable":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.mixed_port, 7890);
+        assert_eq!(cfg.socks_port, 7891);
+        assert!(cfg.tun.unwrap().enable);
+        assert!(!cfg.dns.unwrap().enable);
+    }
+
+    #[test]
+    fn test_connections_report() {
+        let c: ConnectionsReport =
+            serde_json::from_str(r#"{"uploadTotal":12,"downloadTotal":34,"connections":[]}"#)
+                .unwrap();
+        assert_eq!(c.upload_total, 12);
+        assert_eq!(c.download_total, 34);
+    }
+
+    #[test]
+    fn test_version_report() {
+        let v: VersionReport =
+            serde_json::from_str(r#"{"version":"v1.18.0","meta":true}"#).unwrap();
+        assert_eq!(v.version, "v1.18.0");
     }
 }
