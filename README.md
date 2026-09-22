@@ -49,6 +49,13 @@ coclash core -v
 coclash core -d ~/.config/coclash -f config.yaml
 ```
 
+### 配置文件
+
+TUI 只编辑 `config.yaml` 中它建模的字段；其余字段（`proxies`、`secret`、`listeners`、
+`experimental`、策略组/订阅的高级选项等）在保存时**原样保留**，不会因为点一次保存就丢失。
+端口字段未配置时不会被凭空补写（避免 `port`/`mixed-port` 重复监听冲突）；
+设置页的「HTTP 端口」对应 mihomo 的 `port`，手写的 `mixed-port` 会保留并在运行时优先使用。
+
 ### 内嵌 mihomo
 
 - 版本固定在 `mihomo.lock`，构建时自动取用（优先 `vendor/mihomo/<target>/mihomo[.exe]`，没有才下载并解压到该目录；`COCLASH_EMBED_MIHOMO` 可指定构建期来源，供 Nix/离线构建使用）。
@@ -84,13 +91,16 @@ GeoIP/GeoSite 默认从国内可达的 jsDelivr 镜像（`testingcf.jsdelivr.net
   端口可达 → 停止（按控制端口找到属主 mihomo 进程结束），否则 → 启动内嵌 mihomo。
 - 停止按「控制端口属主」定位，不会误杀监听其它端口的 mihomo；若端口被非 mihomo 程序占用，
   停止会报「未找到监听控制端口的 mihomo 进程」，启动则报端口占用。
-- 启动失败但进程残留时（端口未就绪），仍可按 `s` 停止。
+- 停止失败（如权限不足）会明确报错，不再假报「已停止」。
+- 若进程已启动但控制端口尚未就绪（如 geo 数据库下载中），`s` 会按「未运行」处理并再启动一次，
+  因此启动失败时请先按 `l` 看日志，等端口就绪后再操作。
 - `coclash core` 启动的实例同样能被 TUI 停止（按 `/proc/<pid>/exe` 识别内存执行的 `memfd:mihomo`）。
 - mihomo 进程的 stdout/stderr 会写入 `{config_dir}/coclash/mihomo.log`，按 `l` 可在 TUI 内查看。
 
 ### 心跳同步
 
-TUI 常驻一个心跳任务（快路径默认 3 秒一次，`settings.json` 的 `heartbeat_interval_ms` 可改，0 = 关闭）：
+TUI 常驻一个心跳任务（快路径默认 3 秒一次，`settings.json` 的 `heartbeat_interval_ms` 可改，0 = 关闭自动心跳）：
+关闭自动心跳后，`r` 与启动内核后的同步会退化为**一次性同步任务**，仍可用。
 
 - **快路径（每 tick）**：端口探测、系统代理状态、累计流量（`/connections`）。
 - **全量（每 10 tick ≈ 30s）**：额外同步内核版本（`/version`）、模式/端口/TUN/DNS（`/configs`）、

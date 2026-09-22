@@ -304,8 +304,10 @@ impl Page for MainPage {
             let info = widgets::RunningInfo::render(state);
             f.render_widget(info, chunks3[0]);
 
-            let width = chunks2[1].width.saturating_sub(10).max(1) as usize;
-            let height = chunks3[1].height.max(1) as usize;
+            // 折行宽度/可见高度都按「去掉边框和标签」的内区算：
+            // 边框左右各 1 列 + 标签 "INFO " 6 列；上下边框 2 行
+            let width = chunks2[1].width.saturating_sub(8).max(1) as usize;
+            let height = chunks3[1].height.saturating_sub(2).max(1) as usize;
             self.operation_log.update(&state.logs, width, height);
             let log = self.operation_log.render(focus == Panel::OperationLog);
             f.render_widget(log, chunks3[1]);

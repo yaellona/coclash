@@ -27,8 +27,10 @@ pub struct RuntimeInfo {
     pub version: Option<String>,
     /// 运行模式（/configs，如 `rule`）
     pub mode: Option<String>,
-    /// 混合端口（/configs）
+    /// 混合端口（/configs；未配置时为 0）
     pub mixed_port: Option<u16>,
+    /// HTTP 端口（/configs；未配置时为 0）
+    pub http_port: Option<u16>,
     /// SOCKS 端口（/configs）
     pub socks_port: Option<u16>,
     /// TUN 开关（/configs）
@@ -52,6 +54,8 @@ pub struct MihomoState {
     pub proxy_running: bool,
     /// 测速任务进行中（任务守卫）
     pub is_test_delay: bool,
+    /// 启停 mihomo 任务进行中（异步任务守卫，避免连按 s 起两个进程）
+    pub is_toggling: bool,
     /// 切换节点任务进行中（连按 Enter 时拒绝新任务，见 tasks.rs）
     pub is_switching_node: bool,
     /// 心跳同步的运行时信息（只读展示）
@@ -66,6 +70,7 @@ impl Default for MihomoState {
             active_node: None,
             proxy_running: false,
             is_test_delay: false,
+            is_toggling: false,
             is_switching_node: false,
             runtime: RuntimeInfo::default(),
         }
@@ -91,10 +96,18 @@ impl AppState {
     pub fn dns_enabled(&self) -> bool {
         self.config.dns.as_ref().is_some_and(|d| d.enable)
     }
-    pub fn proxy_addr(&self) -> String {
-        // 运行中优先用 mihomo 实际端口（可能与本地配置文件不同）
-        let port = self.mihomo.runtime.mixed_port.unwrap_or(self.config.port);
-        format!("127.0.0.1:{port}")
+    /// 系统代理地址：优先运行中实际监听端口（mixed-port > http-port），
+    /// 否则回落本地配置；端口未知或为 0 时返回 None（不能拿 0 当端口）。
+    pub fn proxy_addr(&self) -> Option<String> {
+        let rt = &self.mihomo.runtime;
+        let port = rt
+            .mixed_port
+            .filter(|p| *p > 0)
+            .or(rt.http_port.filter(|p| *p > 0))
+            .or(self.config.mixed_port)
+            .or(self.config.port)
+            .filter(|p| *p > 0)?;
+        Some(format!("127.0.0.1:{port}"))
     }
 }
 
@@ -171,9 +184,19 @@ mod tests {
         let mut state = AppState::test_fixture();
         assert_eq!(
             state.proxy_addr(),
-            format!("127.0.0.1:{}", state.config.port)
+            Some(format!("127.0.0.1:{}", state.config.port.unwrap()))
+        );
+        // 运行时 mixed-port=0（未启用混合端口）不能覆盖本地 HTTP 端口
+        state.mihomo.runtime.mixed_port = Some(0);
+        assert_eq!(
+            state.proxy_addr(),
+            Some(format!("127.0.0.1:{}", state.config.port.unwrap()))
         );
         state.mihomo.runtime.mixed_port = Some(12345);
-        assert_eq!(state.proxy_addr(), "127.0.0.1:12345");
+        assert_eq!(state.proxy_addr().as_deref(), Some("127.0.0.1:12345"));
+        // 完全无端口配置时不得返回 127.0.0.1:0
+        state.config.port = None;
+        state.mihomo.runtime.mixed_port = Some(0);
+        assert_eq!(state.proxy_addr(), None);
     }
 }

@@ -22,6 +22,7 @@ use super::{Manager, Shared};
 use crate::core::mihomo::api::{ConfigsReport, ProxyReport};
 use crate::core::mihomo::{self, MihomoStatus};
 use crate::core::system_proxy::get_proxy_status;
+use crate::error::Error;
 use crate::manager::state::{MihomoState, RuntimeInfo, merge_nodes, node_names_changed};
 use crate::operation_log::LogType;
 use std::sync::Arc;
@@ -41,8 +42,10 @@ struct ApiSnapshot {
     version: Option<String>,
     totals: Option<(u64, u64)>,
     proxies: Option<ProxyReport>,
-    /// 任一请求失败时的错误文本（用于就绪/断开跃迁日志）
+    /// 任一请求失败时的错误文本（用于退避与首次失败日志）
     error: Option<String>,
+    /// 就绪探测（`/configs`）失败：只有它才代表整个 API 不可用
+    ready_probe_failed: bool,
 }
 
 impl Manager {
@@ -50,6 +53,7 @@ impl Manager {
     pub fn start_heartbeat(&self) {
         let every = self.settings().heartbeat_interval();
         if every.is_zero() {
+            self.log_warn("心跳已关闭（heartbeat_interval_ms=0）：仅手动 r 触发一次性同步");
             return;
         }
         let heartbeat = Heartbeat {
@@ -59,6 +63,53 @@ impl Manager {
         };
         tokio::spawn(heartbeat.run(every));
     }
+
+    /// 请求立即同步一次：心跳开启时唤醒心跳并强制全量；
+    /// 心跳关闭（间隔 0）时退化为一次性同步任务，否则 `r`/启动后的同步会静默失效
+    pub fn sync_now(&self) {
+        if !self.settings().heartbeat_interval().is_zero() {
+            self.shared().sync_now();
+            return;
+        }
+        sync_once_now(self.shared());
+    }
+}
+
+/// 心跳关闭时的一次性同步任务（强制全量）
+fn sync_once_now(shared: &Arc<Shared>) {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        shared.force_full.store(true, Ordering::Relaxed);
+        Heartbeat {
+            shared,
+            tick: 0,
+            failures: 0,
+        }
+        .sync_once()
+        .await;
+    });
+}
+
+/// 延迟触发一次同步：内核刚启动时端口尚未绑定，立即探测会误判离线并留下
+/// 「mihomo 已停止」的误导日志；心跳关闭时同样退化为一次性任务。
+pub(crate) fn sync_now_delayed(shared: &Arc<Shared>, delay: Duration) {
+    if delay.is_zero() {
+        if shared.settings.heartbeat_interval().is_zero() {
+            sync_once_now(shared);
+        } else {
+            shared.sync_now();
+        }
+        return;
+    }
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        if shared.settings.heartbeat_interval().is_zero() {
+            sync_once_now(&shared);
+        } else {
+            shared.sync_now();
+        }
+    });
 }
 
 /// 心跳任务：持有节拍与退避计数，IO 与状态应用分离
@@ -100,6 +151,10 @@ impl Heartbeat {
             for (log_type, msg) in logs {
                 shared.log(log_type, msg);
             }
+            // 离线时清掉退避计数，并预约端口回来后立即全量同步：
+            // 否则外部重新启动 mihomo 后，节点/端口可能等最多 8 个 tick 才刷新
+            self.failures = 0;
+            shared.force_full.store(true, Ordering::Relaxed);
             return;
         }
 
@@ -140,6 +195,7 @@ impl Heartbeat {
             let mut st = shared.lock();
             apply_snapshot(&mut st.mihomo, &snapshot)
         };
+        let first_failure = snapshot.error.is_some() && self.failures == 0;
         match snapshot.error {
             Some(_) => self.failures = self.failures.saturating_add(1),
             None => self.failures = 0,
@@ -147,12 +203,21 @@ impl Heartbeat {
         for (log_type, msg) in logs {
             shared.log(log_type, msg);
         }
+        // 非就绪探测失败（/version、/proxies、/connections）：每次失败连击只提示一次，
+        // 就绪探测失败由 apply_snapshot 的断开日志负责，避免重复
+        if first_failure
+            && !snapshot.ready_probe_failed
+            && let Some(e) = &snapshot.error
+        {
+            shared.log(LogType::Warn, format!("mihomo API 请求失败: {e}"));
+        }
         shared.mark_redraw();
     }
 }
 
 /// 拉取 API 快照：全量拉 configs/version/proxies，快路径只拉 connections。
-/// `configs` 失败即视为 API 不可用，跳过其余请求（避免多次超时）。
+/// `configs` 失败即视为 API 不可用（就绪探测），跳过其余请求（避免多次超时）；
+/// 其余接口失败只记录错误，不丢弃本轮已成功的数据。
 async fn fetch_snapshot(shared: &Arc<Shared>, full: bool) -> ApiSnapshot {
     let mut snapshot = ApiSnapshot::default();
     if full {
@@ -160,44 +225,53 @@ async fn fetch_snapshot(shared: &Arc<Shared>, full: bool) -> ApiSnapshot {
             Ok(cfg) => snapshot.configs = Some(cfg),
             Err(e) => {
                 snapshot.error = Some(e.to_string());
+                snapshot.ready_probe_failed = true;
                 return snapshot;
             }
         }
-        if let Ok(v) = shared.api.get_version().await {
-            snapshot.version = Some(v.version);
+        match shared.api.get_version().await {
+            Ok(v) => snapshot.version = Some(v.version),
+            Err(e) => record_error(&mut snapshot, e),
         }
-        if let Ok(p) = shared.api.get_proxy().await {
-            snapshot.proxies = Some(p);
+        match shared.api.get_proxy().await {
+            Ok(p) => snapshot.proxies = Some(p),
+            Err(e) => record_error(&mut snapshot, e),
         }
     }
     match shared.api.get_connections().await {
         Ok(c) => snapshot.totals = Some((c.upload_total, c.download_total)),
-        Err(e) => {
-            if snapshot.error.is_none() {
-                snapshot.error = Some(e.to_string());
-            }
-        }
+        Err(e) => record_error(&mut snapshot, e),
     }
     snapshot
 }
 
-/// 纯函数：应用快照并返回待写日志（无 IO / 无锁 / 可单测）
+/// 只保留首个错误文本（用于退避与首次失败日志）
+fn record_error(snapshot: &mut ApiSnapshot, e: Error) {
+    if snapshot.error.is_none() {
+        snapshot.error = Some(e.to_string());
+    }
+}
+
+/// 纯函数：应用快照并返回待写日志（无 IO / 无锁 / 可单测）。
+/// 只有就绪探测失败才清空就绪状态；其余接口失败不影响已成功字段的应用。
 fn apply_snapshot(state: &mut MihomoState, snapshot: &ApiSnapshot) -> Vec<(LogType, String)> {
     let mut logs = Vec::new();
-    if let Some(e) = &snapshot.error {
+    if snapshot.ready_probe_failed {
         if state.runtime.api_ready {
             state.runtime.api_ready = false;
+            let e = snapshot.error.as_deref().unwrap_or("未知错误");
             logs.push((LogType::Warn, format!("mihomo API 连接断开: {e}")));
         }
         return logs;
     }
-    if snapshot.configs.is_some() && !state.runtime.api_ready {
-        state.runtime.api_ready = true;
-        logs.push((LogType::Info, "mihomo 已就绪，开始同步信息".into()));
-    }
     if let Some(cfg) = &snapshot.configs {
+        if !state.runtime.api_ready {
+            state.runtime.api_ready = true;
+            logs.push((LogType::Info, "mihomo 已就绪，开始同步信息".into()));
+        }
         state.runtime.mode = Some(cfg.mode.clone());
         state.runtime.mixed_port = Some(cfg.mixed_port);
+        state.runtime.http_port = Some(cfg.port);
         state.runtime.socks_port = Some(cfg.socks_port);
         state.runtime.tun_enabled = cfg.tun.as_ref().map(|t| t.enable);
         state.runtime.dns_enabled = cfg.dns.as_ref().map(|d| d.enable);
@@ -250,6 +324,7 @@ mod tests {
     fn snapshot_with_configs() -> ApiSnapshot {
         ApiSnapshot {
             configs: Some(ConfigsReport {
+                port: 7892,
                 mixed_port: 7890,
                 socks_port: 7891,
                 mode: "rule".into(),
@@ -276,6 +351,7 @@ mod tests {
         apply_snapshot(&mut state, &snapshot_with_configs());
         let snapshot = ApiSnapshot {
             error: Some("timeout".into()),
+            ready_probe_failed: true,
             ..ApiSnapshot::default()
         };
         let first = apply_snapshot(&mut state, &snapshot);
@@ -283,6 +359,46 @@ mod tests {
         assert_eq!(first.len(), 1);
         let second = apply_snapshot(&mut state, &snapshot);
         assert!(second.is_empty(), "断开日志只应记录一次");
+    }
+
+    #[test]
+    fn test_partial_failure_keeps_successful_data() {
+        // /connections 超时（error 非空）不能丢弃同一轮已成功的 /configs、/proxies
+        let mut state = MihomoState::default();
+        let snapshot = ApiSnapshot {
+            configs: Some(ConfigsReport {
+                port: 7892,
+                mixed_port: 7890,
+                socks_port: 7891,
+                mode: "rule".into(),
+                tun: None,
+                dns: None,
+            }),
+            proxies: Some(ProxyReport {
+                alive: true,
+                all: vec!["a".into()],
+                dialer_proxy: String::new(),
+                hidden: false,
+                icon: String::new(),
+                interface: String::new(),
+                name: "Proxy".into(),
+                now: "a".into(),
+                node_type: "Selector".into(),
+            }),
+            error: Some("connections timeout".into()),
+            ready_probe_failed: false,
+            ..ApiSnapshot::default()
+        };
+        let logs = apply_snapshot(&mut state, &snapshot);
+        assert!(state.runtime.api_ready, "只有 /configs 失败才算断开");
+        assert_eq!(state.runtime.mode.as_deref(), Some("rule"));
+        assert_eq!(state.runtime.http_port, Some(7892));
+        assert_eq!(state.nodes.len(), 1);
+        assert!(logs.iter().any(|(_, m)| m.contains("已就绪")));
+        assert!(
+            !logs.iter().any(|(_, m)| m.contains("断开")),
+            "部分接口失败不应报断开"
+        );
     }
 
     #[test]
@@ -313,6 +429,7 @@ mod tests {
         });
         let snapshot = ApiSnapshot {
             configs: Some(ConfigsReport {
+                port: 3,
                 mixed_port: 1,
                 socks_port: 2,
                 mode: "global".into(),

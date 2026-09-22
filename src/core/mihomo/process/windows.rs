@@ -193,11 +193,17 @@ fn spawn_detached(prepared: &PreparedExec, config_dir: &Path) -> Result<u32, Err
 /// 等提权 mihomo 退出后删除临时目录（句柄缓存不受影响，仍可正常停止进程）
 fn spawn_cleanup(handle: ProcessHandle, dir: PathBuf) {
     std::thread::spawn(move || {
-        unsafe {
-            WaitForSingleObject(handle.0, INFINITE);
-        }
-        let _ = fs::remove_dir_all(&dir);
+        // 必须把整个 `ProcessHandle` 传进函数：闭包若直接读 `handle.0`
+        // 会按字段捕获裸指针，绕过下面的 `unsafe impl Send`
+        wait_and_cleanup(handle, dir);
     });
+}
+
+fn wait_and_cleanup(handle: ProcessHandle, dir: PathBuf) {
+    unsafe {
+        WaitForSingleObject(handle.0, INFINITE);
+    }
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// 分离会话：新进程组 + 无控制台（mihomo 持续在后台运行）

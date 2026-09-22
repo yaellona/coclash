@@ -35,6 +35,8 @@ pub struct VersionReport {
 /// `/configs` 响应（心跳只取运行时展示需要的字段）
 #[derive(Debug, Deserialize)]
 pub struct ConfigsReport {
+    #[serde(rename = "port", default)]
+    pub port: u16,
     #[serde(rename = "mixed-port", default)]
     pub mixed_port: u16,
     #[serde(rename = "socks-port", default)]
@@ -202,10 +204,11 @@ mod tests {
     #[test]
     fn test_configs_report_full() {
         let cfg: ConfigsReport = serde_json::from_str(
-            r#"{"mixed-port":7890,"socks-port":7891,"mode":"global","tun":{"enable":true},"dns":{"enable":false}}"#,
+            r#"{"port":7890,"mixed-port":7899,"socks-port":7891,"mode":"global","tun":{"enable":true},"dns":{"enable":false}}"#,
         )
         .unwrap();
-        assert_eq!(cfg.mixed_port, 7890);
+        assert_eq!(cfg.port, 7890);
+        assert_eq!(cfg.mixed_port, 7899);
         assert_eq!(cfg.socks_port, 7891);
         assert!(cfg.tun.unwrap().enable);
         assert!(!cfg.dns.unwrap().enable);

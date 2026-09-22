@@ -416,25 +416,50 @@ fn exe_matches(exe: &str) -> bool {
 }
 
 pub(super) fn kill_pid(pid: u32) -> Result<(), Error> {
-    unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
+    // SIGTERM；失败必须上报，不能像以前那样无条件返回 Ok 谎报「已停止」
+    if unsafe { libc::kill(pid as i32, libc::SIGTERM) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        return Err(Error::Process(format!("结束 mihomo (PID {pid}) 失败: {e}")));
     }
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while super::is_pid_alive(pid) && std::time::Instant::now() < deadline {
+    while !pid_gone(pid) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
-    if super::is_pid_alive(pid) {
-        unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
+    if !pid_gone(pid) {
+        if unsafe { libc::kill(pid as i32, libc::SIGKILL) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::ESRCH) {
+                return Err(Error::Process(format!(
+                    "强制结束 mihomo (PID {pid}) 失败: {e}"
+                )));
+            }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !pid_gone(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
-    // waitpid 收割，防止僵尸进程
-    unsafe {
-        let mut status = 0;
-        libc::waitpid(pid as i32, &mut status, 0);
+    if !pid_gone(pid) {
+        return Err(Error::Process(format!(
+            "mihomo (PID {pid}) 未能结束（可能权限不足，试试以相同用户运行）"
+        )));
     }
     Ok(())
+}
+
+/// 进程是否真正结束：本进程启动的子进程退出后会短暂成为僵尸，
+/// `kill(pid, 0)` 仍返回存活，必须 waitpid 收割；非子进程 waitpid 返回 ECHILD，
+/// 回落到 kill 探测。
+fn pid_gone(pid: u32) -> bool {
+    let mut status = 0;
+    let rc = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+    if rc == pid as i32 {
+        return true;
+    }
+    !super::is_pid_alive(pid)
 }
 
 /// TUN 权限检查：mihomo 进程缺少 CAP_NET_ADMIN/CAP_NET_RAW 时给出提示。
@@ -505,7 +530,7 @@ mod tests {
         assert!(!is_nix_path(Path::new("/home/u/.local/bin/coclash")));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "embed-mihomo"))]
     #[test]
     fn test_memfd_exec_content_roundtrip() {
         use std::io::{Read, Seek, SeekFrom};

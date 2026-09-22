@@ -9,7 +9,7 @@
 use crate::manager::state::AppState;
 use crate::tui::cmd::Cmd;
 use crate::tui::pages::{BINDINGS, PageId};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// 按键模式：精确按键 或 任意字符（输入类页面用 `AnyChar` 捕获文本输入）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -106,13 +106,20 @@ pub fn binding_meta<W>(page: PageId, bindings: &'static [Binding<W>]) -> Vec<Bin
         .collect()
 }
 
-/// 按绑定表分发按键：精确匹配优先，其次 `AnyChar` 兜底
+/// 按绑定表分发按键：精确匹配优先，其次 `AnyChar` 兜底。
+/// 带 Ctrl/Alt 的组合键不参与匹配（否则 Ctrl+D 会命中 `d` 删除规则这类误操作）。
 pub fn dispatch<W>(
     bindings: &'static [Binding<W>],
     page: &mut W,
     state: &AppState,
     key: KeyEvent,
 ) -> Cmd {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return Cmd::none();
+    }
     let code = key.code;
     let hit = bindings
         .iter()

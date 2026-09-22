@@ -118,8 +118,8 @@ impl SettingsPage {
         let config = &state.config;
         match kind {
             FieldKind::Mode => config.mode.clone(),
-            FieldKind::Port => config.port.to_string(),
-            FieldKind::SocksPort => config.socks_port.to_string(),
+            FieldKind::Port => config.port.map(|p| p.to_string()).unwrap_or_default(),
+            FieldKind::SocksPort => config.socks_port.map(|p| p.to_string()).unwrap_or_default(),
             FieldKind::AllowLan => on_off(config.allow_lan),
             FieldKind::LogLevel => config.log_level.clone(),
             FieldKind::UnifiedDelay => on_off(config.unified_delay),
@@ -137,8 +137,19 @@ impl SettingsPage {
         }
         let runtime = match kind {
             FieldKind::Mode => state.mihomo.runtime.mode.clone(),
-            FieldKind::Port => state.mihomo.runtime.mixed_port.map(|p| p.to_string()),
-            FieldKind::SocksPort => state.mihomo.runtime.socks_port.map(|p| p.to_string()),
+            // 端口 0 表示该监听未启用，不作为「运行时值」提示
+            FieldKind::Port => state
+                .mihomo
+                .runtime
+                .http_port
+                .filter(|p| *p > 0)
+                .map(|p| p.to_string()),
+            FieldKind::SocksPort => state
+                .mihomo
+                .runtime
+                .socks_port
+                .filter(|p| *p > 0)
+                .map(|p| p.to_string()),
             FieldKind::Tun => state.mihomo.runtime.tun_enabled.map(on_off),
             FieldKind::Dns => state.mihomo.runtime.dns_enabled.map(on_off),
             _ => None,
@@ -281,23 +292,32 @@ impl SettingsPage {
         Cmd::none()
     }
 
-    fn show_rules(&mut self, _state: &AppState) -> Cmd {
-        if self.editing.is_none() && self.view == View::Fields {
+    fn show_rules(&mut self, state: &AppState, key: KeyEvent) -> Cmd {
+        if self.editing.is_some() {
+            return self.input_char(state, key);
+        }
+        if self.view == View::Fields {
             self.view = View::Rules;
         }
         Cmd::none()
     }
 
-    fn add_rule(&mut self, state: &AppState) -> Cmd {
-        if self.editing.is_none() && self.view == View::Rules {
+    fn add_rule(&mut self, state: &AppState, key: KeyEvent) -> Cmd {
+        if self.editing.is_some() {
+            return self.input_char(state, key);
+        }
+        if self.view == View::Rules {
             self.start_add_rule(state)
         } else {
             Cmd::none()
         }
     }
 
-    fn remove_rule(&mut self, state: &AppState) -> Cmd {
-        if self.editing.is_none() && self.view == View::Rules {
+    fn remove_rule(&mut self, state: &AppState, key: KeyEvent) -> Cmd {
+        if self.editing.is_some() {
+            return self.input_char(state, key);
+        }
+        if self.view == View::Rules {
             self.delete_rule(state)
         } else {
             Cmd::none()
@@ -305,10 +325,13 @@ impl SettingsPage {
     }
 
     fn input_char(&mut self, _state: &AppState, key: KeyEvent) -> Cmd {
+        // 判据是「当前在编辑什么」而不是 edit.rule：新增规则时 rule 也是 None，
+        // 但它和字段编辑不同，必须允许任意字符（否则规则只能输数字）
+        let rule_text = self.view == View::Rules;
         if let Some(edit) = self.editing.as_mut()
             && let KeyCode::Char(c) = key.code
         {
-            if edit.rule.is_some() {
+            if rule_text {
                 if edit.buffer.len() < 200 {
                     edit.buffer.push(c);
                 }
@@ -349,19 +372,19 @@ impl Page for SettingsPage {
         ),
         Binding::on(KeyPattern::Code(KeyCode::Up), "导航", false, Self::up),
         Binding::on(KeyPattern::Code(KeyCode::Down), "导航", false, Self::down),
-        Binding::on(
+        Binding::text(
             KeyPattern::Code(KeyCode::Char('r')),
             "规则",
             false,
             Self::show_rules,
         ),
-        Binding::on(
+        Binding::text(
             KeyPattern::Code(KeyCode::Char('a')),
             "添加规则",
             false,
             Self::add_rule,
         ),
-        Binding::on(
+        Binding::text(
             KeyPattern::Code(KeyCode::Char('d')),
             "删除规则",
             false,
@@ -540,7 +563,7 @@ const FIELDS: [FieldDef; 10] = [
         kind: FieldKind::Mode,
     },
     FieldDef {
-        label: "混合端口",
+        label: "HTTP 端口",
         kind: FieldKind::Port,
     },
     FieldDef {
@@ -657,7 +680,7 @@ mod tests {
     fn test_edit_port_applies_change() {
         let state = AppState::test_fixture();
         let mut page = SettingsPage::new();
-        page.fields_select = 1; // 混合端口
+        page.fields_select = 1; // HTTP 端口
         assert_eq!(page.handle_key(&state, key(KeyCode::Enter)), Cmd::none());
         // 清空原端口（默认 4 位）后输入 9999
         for _ in 0..4 {
@@ -668,6 +691,32 @@ mod tests {
         }
         let cmd = page.handle_key(&state, key(KeyCode::Enter));
         assert_eq!(cmd, Cmd::effect(Effect::Config(ConfigChange::Port(9999))));
+    }
+
+    #[test]
+    fn test_rule_edit_accepts_adr_chars() {
+        let state = AppState::test_fixture();
+        let mut page = SettingsPage::new();
+        // 进入规则视图并开始新增规则
+        page.handle_key(&state, key(KeyCode::Char('r')));
+        page.handle_key(&state, key(KeyCode::Char('a')));
+        assert!(page.editing.is_some(), "应进入新增规则编辑态");
+        // 编辑态下 a/d/r 必须是文本输入，不能触发增删规则/切视图
+        for c in ['a', 'd', 'r', 'D'] {
+            assert_eq!(page.handle_key(&state, key(KeyCode::Char(c))), Cmd::none());
+        }
+        assert_eq!(page.editing.as_ref().unwrap().buffer, "adrD");
+    }
+
+    #[test]
+    fn test_ctrl_d_does_not_delete_rule() {
+        let state = AppState::test_fixture();
+        let mut page = SettingsPage::new();
+        page.handle_key(&state, key(KeyCode::Char('r')));
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        // 带 Ctrl 的组合键不参与绑定匹配：不能命中「删除规则」
+        assert_eq!(page.handle_key(&state, ctrl_d), Cmd::none());
+        assert!(page.view == View::Rules);
     }
 
     #[test]

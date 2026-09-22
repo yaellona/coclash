@@ -4,6 +4,7 @@
 //! 由注册表统一调用 `Manager::exec` 执行；因此 `Effect`/`ConfigChange` 是
 //! 层间契约，也是单测的断言对象。
 use super::Manager;
+use crate::operation_log::LogType;
 
 /// UI 可请求的副作用（数据，不是闭包）。
 #[derive(Debug, Clone, PartialEq)]
@@ -74,8 +75,8 @@ impl Manager {
                 }
             }
             ConfigChange::Dns(on) => self.edit_config(|c| c.set_dns_enabled(on)),
-            ConfigChange::Port(v) => self.edit_config(|c| c.port = v),
-            ConfigChange::SocksPort(v) => self.edit_config(|c| c.socks_port = v),
+            ConfigChange::Port(v) => self.edit_config(|c| c.port = Some(v)),
+            ConfigChange::SocksPort(v) => self.edit_config(|c| c.socks_port = Some(v)),
             ConfigChange::KeepAlive(v) => self.edit_config(|c| c.keep_alive_interval = v),
             ConfigChange::SetRule { index, text } => self.edit_config(|c| {
                 if index < c.rules.len() {
@@ -97,11 +98,19 @@ impl Manager {
         self.save_and_reload();
     }
 
-    /// 落盘 + 重载（失败只记日志）
+    /// 落盘 + 重载（异步：YAML 序列化/写盘放阻塞线程池，失败只记日志）
     pub fn save_and_reload(&self) {
-        match self.save_config() {
-            Ok(()) => self.reload_config(),
-            Err(e) => self.log_err(e),
-        }
+        let shared = self.shared().clone();
+        tokio::spawn(async move {
+            let res = {
+                let shared = shared.clone();
+                tokio::task::spawn_blocking(move || super::tasks::write_config(&shared)).await
+            };
+            match res {
+                Ok(Ok(())) => super::tasks::reload_config_impl(&shared).await,
+                Ok(Err(e)) => shared.log(LogType::Error, e.to_string()),
+                Err(e) => shared.log(LogType::Error, format!("写盘任务失败: {e}")),
+            }
+        });
     }
 }

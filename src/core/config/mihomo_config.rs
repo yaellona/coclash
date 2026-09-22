@@ -9,12 +9,29 @@ use std::fs;
 use std::path::PathBuf;
 
 /// 缺字段时回落到 `Default`（即 `default_config()`），旧版本/手写精简配置不会解析失败。
+///
+/// 端口字段用 `Option` + `skip_serializing_if`：用户手写配置只设了 `mixed-port`
+/// 时，保存不能凭空写出一个同号的 `port`（两个监听同端口会 bind 冲突）。
+///
+/// `extra` 收集未建模字段（`proxies`/`listeners`/`experimental`/`secret`…），
+/// 保存时原样写回，避免 TUI 编辑一次就丢用户配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MihomoConfig {
-    pub port: u16,
-    #[serde(rename = "socks-port")]
-    pub socks_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(
+        rename = "socks-port",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub socks_port: Option<u16>,
+    #[serde(
+        rename = "mixed-port",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mixed_port: Option<u16>,
     #[serde(rename = "allow-lan")]
     pub allow_lan: bool,
     pub mode: String,
@@ -40,6 +57,9 @@ pub struct MihomoConfig {
     #[serde(rename = "proxy-providers")]
     pub proxy_providers: Option<IndexMap<String, ProxyProvider>>,
     pub rules: Vec<String>,
+    /// 未建模字段原样保留（顺序与文件一致）
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 
 const GEO_MIRROR: &str = "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release";
@@ -50,6 +70,8 @@ pub struct GeoXUrl {
     pub geoip: String,
     pub geosite: String,
     pub mmdb: String,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 
 impl Default for GeoXUrl {
@@ -58,17 +80,22 @@ impl Default for GeoXUrl {
             geoip: format!("{GEO_MIRROR}/geoip.dat"),
             geosite: format!("{GEO_MIRROR}/geosite.dat"),
             mmdb: format!("{GEO_MIRROR}/geoip.metadb"),
+            extra: IndexMap::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClashForAndroid {
     #[serde(rename = "append-system-dns")]
     pub append_system_dns: bool,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Sniffer {
     pub sniff: SniffConfig,
     pub enable: bool,
@@ -82,19 +109,27 @@ pub struct Sniffer {
     pub force_dns_mapping: bool,
     #[serde(rename = "override-destination")]
     pub override_destination: bool,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SniffConfig {
     pub tls: PortConfig,
     pub http: PortConfig,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PortConfig {
     pub ports: Vec<String>,
     #[serde(rename = "override-destination")]
     pub override_destination: bool,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -135,6 +170,8 @@ pub struct Tun {
     pub strict_route: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u32>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 
 impl Tun {
@@ -148,6 +185,7 @@ impl Tun {
             auto_detect_interface: Some(true),
             strict_route: Some(true),
             mtu: Some(1500),
+            extra: IndexMap::new(),
         }
     }
 }
@@ -196,6 +234,8 @@ pub struct Dns {
         skip_serializing_if = "Option::is_none"
     )]
     pub nameserver_policy: Option<IndexMap<String, Vec<String>>>,
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 
 impl Dns {
@@ -229,11 +269,13 @@ impl Dns {
             ]),
             proxy_server_nameserver: Some(vec!["https://223.5.5.5/dns-query".to_string()]),
             nameserver_policy: Some(policy),
+            extra: IndexMap::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProxyGroup {
     pub name: String,
     #[serde(rename = "type")]
@@ -241,9 +283,13 @@ pub struct ProxyGroup {
     pub proxies: Vec<String>,
     #[serde(rename = "use")]
     pub use_list: Vec<String>,
+    /// 组内未建模字段（url/interval/filter…）原样保留
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProxyProvider {
     #[serde(rename = "type")]
     pub provider_type: String,
@@ -251,13 +297,29 @@ pub struct ProxyProvider {
     pub interval: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header: Option<HashMap<String, Vec<String>>>,
+    /// provider 未建模字段（path/health-check/filter…）原样保留
+    #[serde(flatten)]
+    pub extra: IndexMap<String, serde_yaml::Value>,
+}
+
+impl Default for ProxyProvider {
+    fn default() -> Self {
+        Self {
+            provider_type: "http".to_string(),
+            url: String::new(),
+            interval: 3600,
+            header: None,
+            extra: IndexMap::new(),
+        }
+    }
 }
 
 impl MihomoConfig {
     pub fn default_config() -> Self {
         Self {
-            port: DEFAULT_MIXED_PORT,
-            socks_port: DEFAULT_SOCKS_PORT,
+            port: Some(DEFAULT_MIXED_PORT),
+            socks_port: Some(DEFAULT_SOCKS_PORT),
+            mixed_port: None,
             allow_lan: true,
             mode: "Rule".to_string(),
             log_level: "info".to_string(),
@@ -269,17 +331,21 @@ impl MihomoConfig {
             keep_alive_interval: 360,
             clash_for_android: ClashForAndroid {
                 append_system_dns: false,
+                extra: IndexMap::new(),
             },
             sniffer: Sniffer {
                 sniff: SniffConfig {
                     tls: PortConfig {
                         ports: vec!["1-65535".to_string()],
                         override_destination: true,
+                        extra: IndexMap::new(),
                     },
                     http: PortConfig {
                         ports: vec!["1-65535".to_string()],
                         override_destination: true,
+                        extra: IndexMap::new(),
                     },
+                    extra: IndexMap::new(),
                 },
                 enable: true,
                 force_domain: vec!["+.netflix.com".to_string()],
@@ -287,12 +353,14 @@ impl MihomoConfig {
                 parse_pure_ip: true,
                 force_dns_mapping: true,
                 override_destination: true,
+                extra: IndexMap::new(),
             },
             proxy_groups: vec![ProxyGroup {
                 name: DEFAULT_GROUP.to_string(),
                 group_type: "select".to_string(),
                 proxies: vec!["DIRECT".to_string()],
                 use_list: vec![],
+                extra: IndexMap::new(),
             }],
             proxy_providers: None,
             rules: vec![
@@ -309,6 +377,7 @@ impl MihomoConfig {
                 "GEOIP,CN,DIRECT".to_string(),
                 "MATCH,Proxy".to_string(),
             ],
+            extra: IndexMap::new(),
         }
     }
 
@@ -378,8 +447,9 @@ impl MihomoConfig {
         }
     }
 
-    /// 仅改内存（重名自动追加序号）；落盘由调用方负责
-    pub fn insert_sub(&mut self, url: String, mut sub_name: String) {
+    /// 仅改内存（重名自动追加序号）；落盘由调用方负责。
+    /// 返回实际写入的名字（可能因重名被改写），日志必须用它而不是调用方猜的名字。
+    pub fn insert_sub(&mut self, url: String, mut sub_name: String) -> String {
         if self.proxy_providers.is_none() {
             self.proxy_providers = Some(IndexMap::new());
         }
@@ -400,15 +470,17 @@ impl MihomoConfig {
             let mut header = HashMap::new();
             header.insert("User-Agent".to_string(), vec![SUBSCRIPTION_UA.to_string()]);
             providers.insert(
-                sub_name,
+                sub_name.clone(),
                 ProxyProvider {
                     provider_type: "http".to_string(),
                     url,
                     interval: 3600,
                     header: Some(header),
+                    extra: IndexMap::new(),
                 },
             );
         }
+        sub_name
     }
 
     pub fn from_yaml(yaml_str: &str) -> Result<Self, Error> {
@@ -488,11 +560,103 @@ mod tests {
     fn test_partial_config_yaml_uses_defaults() {
         // P0 回归：缺字段的 config.yaml 不应解析失败；缺失字段取 default_config 的值
         let config = MihomoConfig::from_yaml("port: 1234\n").unwrap();
-        assert_eq!(config.port, 1234);
-        assert_eq!(config.socks_port, MihomoConfig::default_config().socks_port);
+        assert_eq!(config.port, Some(1234));
+        // 端口是「未配置就不生成」：凭空补 socks-port/mixed-port 会与用户配置冲突
+        assert_eq!(config.socks_port, None);
+        assert_eq!(config.mixed_port, None);
         assert_eq!(config.mode, "Rule");
         assert!(!config.rules.is_empty());
         assert!(config.tun.is_none());
+    }
+
+    #[test]
+    fn test_unmodeled_fields_preserved_on_save() {
+        // 用户手写字段（proxies/secret/listeners…）保存后必须原样保留
+        let yaml = r#"
+mixed-port: 7890
+secret: "hunter2"
+proxies:
+  - name: n1
+    type: ss
+    server: example.com
+listeners:
+  - name: in1
+    type: socks
+experimental:
+  quic-go-disable-gso: true
+proxy-groups:
+  - name: Proxy
+    type: select
+    use: [sub1]
+    url: https://example.com/health
+    interval: 300
+proxy-providers:
+  sub1:
+    type: http
+    url: https://example.com/sub
+    health-check: { enable: true, url: https://example.com }
+rules: []
+"#;
+        let config = MihomoConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.mixed_port, Some(7890));
+        assert_eq!(config.port, None);
+        assert!(config.extra.contains_key("secret"));
+        assert!(config.extra.contains_key("proxies"));
+        assert!(config.extra.contains_key("listeners"));
+        assert!(config.extra.contains_key("experimental"));
+        // 组内未建模字段（url/interval）与 provider 的健康检查配置保留
+        let group = &config.proxy_groups[0];
+        assert_eq!(group.name, "Proxy");
+        assert!(group.extra.contains_key("url"));
+        assert!(group.extra.contains_key("interval"));
+        let provider = config
+            .proxy_providers
+            .as_ref()
+            .unwrap()
+            .get("sub1")
+            .unwrap();
+        assert!(provider.extra.contains_key("health-check"));
+
+        let out = config.to_yaml().unwrap();
+        assert!(out.contains("hunter2"), "secret 丢失");
+        assert!(out.contains("proxies:"));
+        assert!(out.contains("listeners:"));
+        assert!(out.contains("health-check:"));
+        // 只设了 mixed-port 时不得凭空补出 port（会 bind 冲突）
+        assert!(!out.contains("\nport:"), "不应写出 port 幽灵字段:\n{out}");
+        let reparsed = MihomoConfig::from_yaml(&out).unwrap();
+        assert_eq!(reparsed.mixed_port, Some(7890));
+        assert_eq!(reparsed.port, None);
+        assert_eq!(
+            reparsed.extra.get("secret").and_then(|v| v.as_str()),
+            Some("hunter2")
+        );
+    }
+
+    #[test]
+    fn test_partial_nested_structs_parse() {
+        // 嵌套块缺字段不应整段解析失败（此前会回退默认配置并覆盖用户文件）
+        let yaml = r#"
+sniffer:
+  enable: true
+clash-for-android: {}
+proxy-groups:
+  - name: G
+    type: url-test
+    proxies: [DIRECT]
+proxy-providers:
+  p1:
+    type: http
+    url: https://example.com/sub
+rules: []
+"#;
+        let config = MihomoConfig::from_yaml(yaml).unwrap();
+        assert!(config.sniffer.enable);
+        assert!(config.proxy_groups[0].use_list.is_empty());
+        assert_eq!(
+            config.proxy_providers.as_ref().unwrap()["p1"].interval,
+            3600
+        );
     }
 
     #[test]

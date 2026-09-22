@@ -25,12 +25,13 @@ fn mode_text(state: &AppState) -> String {
 }
 
 fn port_text(state: &AppState) -> String {
-    state
-        .mihomo
-        .runtime
-        .mixed_port
-        .unwrap_or(state.config.port)
-        .to_string()
+    match state.proxy_addr() {
+        Some(addr) => addr
+            .rsplit_once(':')
+            .map(|(_, p)| p.to_string())
+            .unwrap_or(addr),
+        None => "-".to_string(),
+    }
 }
 
 impl RunningInfo {
@@ -53,7 +54,8 @@ impl RunningInfo {
         let rows: Vec<Row> = vec![
             Row::new(vec![
                 Cell::from("代理".to_string()),
-                Cell::from(state.proxy_addr()).style(Color::LightMagenta),
+                Cell::from(state.proxy_addr().unwrap_or_else(|| "-".to_string()))
+                    .style(Color::LightMagenta),
             ]),
             Row::new(vec![
                 Cell::from("节点".to_string()),

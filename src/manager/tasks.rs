@@ -10,9 +10,11 @@
 //!   `await`（无锁）→ 短临界区（回灌）
 //! - 日志去重交给心跳；本文件的任务每次执行都记日志（用户主动触发，需要反馈）
 use super::{Manager, Shared};
+use crate::core::mihomo::{self, BinarySource, MihomoStatus, embedded};
 use crate::error::Error;
 use crate::operation_log::LogType;
 use std::sync::Arc;
+use std::time::Duration;
 
 impl Manager {
     /// 切换节点：乐观预置 active_node → 异步切换 → 回灌日志
@@ -40,7 +42,7 @@ impl Manager {
         });
     }
 
-    /// 添加订阅：锁内按「订阅{n}」命名 → 锁内插入 → 锁外写盘 → 重载
+    /// 添加订阅：锁内命名 + 插入（同一临界区）→ 锁外写盘 → 重载
     pub fn insert_sub(&self, url: String) {
         let shared = self.shared().clone();
         tokio::spawn(async move {
@@ -49,14 +51,105 @@ impl Manager {
     }
 }
 
-/// config 落盘：锁内克隆（短临界区）→ 锁外序列化 + 写盘
+/// 启停 mihomo（异步任务）：端口探测、UAC 等待、SIGTERM 轮询都是阻塞 IO，
+/// 一律放阻塞线程池，避免卡住 UI；`is_toggling` 守卫拒绝并发触发。
+pub(crate) fn toggle_mihomo(shared: &Arc<Shared>) {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        toggle_mihomo_task(&shared).await;
+    });
+}
+
+/// config 落盘：写盘串行化（save_lock）→ 锁内克隆 → 锁外序列化 + 写盘。
+/// save_lock 保证「克隆 + 写盘」原子：并发保存不会出现旧快照覆盖新快照。
 pub(crate) fn write_config(shared: &Arc<Shared>) -> Result<(), Error> {
+    let _save_guard = shared.save_lock.lock().unwrap_or_else(|e| e.into_inner());
     let config = shared.lock().config.clone();
     config.write_to_path(&shared.config_path)
 }
 
+/// 在阻塞线程池执行落盘，返回结果（join 失败按 IO 错误上报）
+async fn write_config_blocking(shared: &Arc<Shared>) -> Result<(), Error> {
+    let shared = shared.clone();
+    tokio::task::spawn_blocking(move || write_config(&shared))
+        .await
+        .unwrap_or_else(|e| Err(Error::Process(format!("写盘任务失败: {e}"))))
+}
+
+async fn toggle_mihomo_task(shared: &Arc<Shared>) {
+    {
+        // 守卫：启停是重 IO，拒绝并发（连按 s 不会起两个进程）
+        let mut st = shared.lock();
+        if st.mihomo.is_toggling {
+            st.logs
+                .add_log(LogType::Warn, "mihomo 操作进行中，请稍候".into());
+            drop(st);
+            shared.mark_redraw();
+            return;
+        }
+        st.mihomo.is_toggling = true;
+    }
+    shared.mark_redraw();
+
+    // 端口探测（阻塞 TCP connect）也放阻塞线程池
+    let port_up = {
+        let settings = shared.settings.clone();
+        tokio::task::spawn_blocking(move || mihomo::is_port_up(&settings))
+            .await
+            .unwrap_or(false)
+    };
+
+    let result: Result<Option<(u32, BinarySource)>, Error> = if port_up {
+        let settings = shared.settings.clone();
+        tokio::task::spawn_blocking(move || mihomo::stop_mihomo(&settings))
+            .await
+            .unwrap_or_else(|e| Err(Error::Process(format!("停止任务失败: {e}"))))
+            .map(|()| None)
+    } else {
+        let settings = shared.settings.clone();
+        let config_path = shared.config_path.clone();
+        let elevate = cfg!(windows);
+        tokio::task::spawn_blocking(move || mihomo::start_mihomo(&settings, &config_path, elevate))
+            .await
+            .unwrap_or_else(|e| Err(Error::Process(format!("启动任务失败: {e}"))))
+            .map(Some)
+    };
+
+    let started = matches!(result, Ok(Some(_)));
+    {
+        let mut st = shared.lock();
+        st.mihomo.is_toggling = false;
+        match &result {
+            Ok(None) => {
+                st.mihomo.status = MihomoStatus::Stopped;
+                st.logs.add_log(LogType::Info, "已停止mihomo".into());
+            }
+            Ok(Some((pid, source))) => {
+                st.mihomo.status = MihomoStatus::Running(*pid);
+                st.logs.add_log(
+                    LogType::Info,
+                    format!(
+                        "mihomo 已启动 (PID {pid}, 内嵌 {}: {source})",
+                        embedded::VERSION
+                    ),
+                );
+            }
+            Err(e) => st.logs.add_log(LogType::Error, e.to_string()),
+        }
+    }
+    shared.mark_redraw();
+
+    // 启动时端口绑定需要时间，延迟同步避免立即探测判离线（留下误导日志）
+    let delay = if started {
+        Duration::from_millis(800)
+    } else {
+        Duration::ZERO
+    };
+    super::heartbeat::sync_now_delayed(shared, delay);
+}
+
 async fn switch_node_impl(shared: &Arc<Shared>, index: usize) {
-    let name = {
+    let (name, prev_active) = {
         // 预置
         let mut st = shared.lock();
         if st.mihomo.is_switching_node {
@@ -69,9 +162,10 @@ async fn switch_node_impl(shared: &Arc<Shared>, index: usize) {
             return;
         };
         let name = node.name.clone();
+        let prev = st.mihomo.active_node;
         st.mihomo.is_switching_node = true;
         st.mihomo.active_node = Some(index);
-        name
+        (name, prev)
     };
     shared.mark_redraw();
     let result = shared.api.switch_node(&name).await;
@@ -80,7 +174,13 @@ async fn switch_node_impl(shared: &Arc<Shared>, index: usize) {
     st.mihomo.is_switching_node = false;
     match result {
         Ok(()) => st.logs.add_log(LogType::Info, format!("切换节点：{name}")),
-        Err(e) => st.logs.add_log(LogType::Error, e.to_string()),
+        Err(e) => {
+            // 乐观预置失败要回滚高亮，不能一直指着没切成功的节点
+            if st.mihomo.active_node == Some(index) {
+                st.mihomo.active_node = prev_active;
+            }
+            st.logs.add_log(LogType::Error, e.to_string());
+        }
     }
     drop(st);
     shared.mark_redraw();
@@ -116,13 +216,22 @@ async fn delay_test_impl(shared: &Arc<Shared>) {
             }
             st.logs.add_log(LogType::Info, "测速完成".into());
         }
-        Err(e) => st.logs.add_log(LogType::Error, e.to_string()),
+        Err(e) => {
+            // 测速失败必须清掉 wait 标记：merge_nodes 会按名字保留旧 speed，
+            // 否则节点会永远显示“wait”
+            for node in &mut st.mihomo.nodes {
+                if node.speed == "wait" {
+                    node.speed = "-".to_string();
+                }
+            }
+            st.logs.add_log(LogType::Error, e.to_string());
+        }
     }
     drop(st);
     shared.mark_redraw();
 }
 
-async fn reload_config_impl(shared: &Arc<Shared>) {
+pub(crate) async fn reload_config_impl(shared: &Arc<Shared>) {
     match shared.api.reload_config(&shared.config_path).await {
         Ok(()) => shared.log(LogType::Info, "重置配置成功"),
         Err(e) => shared.log(LogType::Error, e.to_string()),
@@ -133,7 +242,9 @@ async fn reload_config_impl(shared: &Arc<Shared>) {
 
 async fn insert_sub_impl(shared: &Arc<Shared>, url: String) {
     let name = {
-        let st = shared.lock();
+        // 命名与插入必须在同一临界区：并发插入各自算 len()+1 会撞名，
+        // 且 insert_sub 内部重名改写后，日志必须用返回的真实名字
+        let mut st = shared.lock();
         let n = st
             .config
             .proxy_providers
@@ -141,16 +252,13 @@ async fn insert_sub_impl(shared: &Arc<Shared>, url: String) {
             .map(|p| p.len())
             .unwrap_or(0)
             + 1;
-        format!("订阅{n}")
+        let name = st.config.insert_sub(url, format!("订阅{n}"));
+        drop(st);
+        shared.mark_redraw();
+        name
     };
-    // 锁内纯内存插入
-    {
-        let mut st = shared.lock();
-        st.config.insert_sub(url, name.clone());
-    }
-    shared.mark_redraw();
-    // 锁外写盘 + 续发重载
-    match write_config(shared) {
+    // 锁外写盘（阻塞线程池）+ 续发重载
+    match write_config_blocking(shared).await {
         Ok(()) => {
             shared.log(LogType::Info, format!("插入订阅：{name}"));
             reload_config_impl(shared).await;

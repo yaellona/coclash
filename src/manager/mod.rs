@@ -39,6 +39,8 @@ pub(crate) struct Shared {
     pub settings: Settings,
     pub config_path: PathBuf,
     pub api: ApiClient,
+    /// 配置写盘串行化：防止两个保存交错导致旧快照覆盖新快照
+    pub save_lock: Mutex<()>,
     /// 重绘请求标志：状态变更置位，主循环消费后清零（dirty-flag 条件重绘）
     pub redraw: AtomicBool,
     pub should_quit: AtomicBool,
@@ -126,6 +128,7 @@ impl Manager {
                 settings,
                 config_path,
                 api,
+                save_lock: Mutex::new(()),
                 redraw: AtomicBool::new(true),
                 should_quit: AtomicBool::new(false),
                 sync_notify: Notify::new(),
@@ -160,11 +163,6 @@ impl Manager {
     /// 主循环消费重绘标志
     pub fn take_redraw(&self) -> bool {
         self.shared.redraw.swap(false, Ordering::Relaxed)
-    }
-
-    /// 请求立即同步一次（唤醒心跳并强制全量，`r` 键与启动后触发）
-    pub fn sync_now(&self) {
-        self.shared.sync_now();
     }
 
     pub fn request_quit(&self) {
@@ -222,8 +220,8 @@ impl Manager {
                     "mihomo 已启动 (PID {pid}, 内嵌 {}: {source})",
                     mihomo::embedded::VERSION,
                 ));
-                // 立即同步：端口就绪后心跳会拉取节点与运行时信息
-                self.sync_now();
+                // 端口绑定需要时间：延迟触发同步（心跳开启=唤醒，关闭=一次性任务）
+                heartbeat::sync_now_delayed(&self.shared, std::time::Duration::from_millis(800));
                 self.mark_redraw();
             }
             Err(e) => self.log_err(e),
@@ -241,33 +239,39 @@ impl Manager {
         }
     }
 
-    /// 直接按端口启停：端口可达 = 运行中 → 停止；否则启动（不判断归属）
+    /// 直接按端口启停：端口可达 = 运行中 → 停止；否则启动（不判断归属）。
+    /// 启停含 UAC 等待、信号轮询等阻塞 IO，交给异步任务（tasks.rs），不卡 UI。
     pub fn toggle_mihomo(&self) {
-        if mihomo::is_port_up(self.settings()) {
-            self.stop_mihomo();
-        } else {
-            self.start_mihomo();
-        }
+        tasks::toggle_mihomo(&self.shared);
     }
 
     pub fn toggle_system_proxy(&self) {
         let is_enabled = get_proxy_status()
             .map(|(code, _)| code == 1)
             .unwrap_or(false);
-        self.state_lock().mihomo.proxy_running = !is_enabled;
-        self.mark_redraw();
         if is_enabled {
             match disable_proxy() {
-                Ok(()) => self.log("关闭系统代理"),
+                Ok(()) => {
+                    self.state_lock().mihomo.proxy_running = false;
+                    self.log("关闭系统代理");
+                }
                 Err(e) => self.log_err(e),
             }
         } else {
-            let addr = self.state_lock().proxy_addr();
+            // 端口未知（未配置/运行时未就绪）时不能拿 0 当端口
+            let Some(addr) = self.state_lock().proxy_addr() else {
+                self.log_err("未配置代理端口，无法开启系统代理");
+                return;
+            };
             match enable_proxy(&addr) {
-                Ok(()) => self.log("开启系统代理"),
+                Ok(()) => {
+                    self.state_lock().mihomo.proxy_running = true;
+                    self.log(format!("开启系统代理 ({addr})"));
+                }
                 Err(e) => self.log_err(e),
             }
         }
+        self.mark_redraw();
     }
 
     pub fn toggle_tun(&self) {

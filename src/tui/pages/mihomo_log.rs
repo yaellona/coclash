@@ -85,7 +85,8 @@ impl MihomoLogPage {
     /// 状态副作用集中在此，`draw` 其余部分保持只读渲染。
     fn update(&mut self, width: usize, height: usize) {
         let changed = self.refresh();
-        self.visible = height.saturating_sub(1).max(1);
+        // 传入的是去掉边框的内区高度，直接作为可见行数（此前多减 1 浪费一行）
+        self.visible = height.max(1);
         if changed || width != self.last_width {
             self.rows = wrap_lines(&self.lines, width.max(1));
             self.last_width = width;

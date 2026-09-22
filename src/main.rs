@@ -6,17 +6,26 @@ use coclash::tui::PageId;
 use coclash::tui::event::LoopEvent;
 use coclash::{manager, tui};
 use crossterm::{
+    cursor::Show,
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 
-/// RAII：无论正常退出、错误还是 panic，都恢复终端
+/// RAII：无论正常退出、错误还是 panic，都恢复终端（含光标的显示状态）
 struct TerminalGuard;
 
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
+        // panic 默认在 alternate screen 里打印，随后被清屏吞掉：
+        // 先恢复终端再交给默认 hook，panic 信息才会留在用户终端上
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+            default_hook(info);
+        }));
         enable_raw_mode()?;
         Ok(Self)
     }
@@ -25,7 +34,8 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        // ratatui 每帧都会隐藏光标，退出时必须显式恢复
+        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
     }
 }
 
