@@ -375,15 +375,8 @@ mod tests {
                 dns: None,
             }),
             proxies: Some(ProxyReport {
-                alive: true,
                 all: vec!["a".into()],
-                dialer_proxy: String::new(),
-                hidden: false,
-                icon: String::new(),
-                interface: String::new(),
-                name: "Proxy".into(),
                 now: "a".into(),
-                node_type: "Selector".into(),
             }),
             error: Some("connections timeout".into()),
             ready_probe_failed: false,
@@ -437,15 +430,8 @@ mod tests {
                 dns: None,
             }),
             proxies: Some(ProxyReport {
-                alive: true,
                 all: vec!["a".into(), "b".into()],
-                dialer_proxy: String::new(),
-                hidden: false,
-                icon: String::new(),
-                interface: String::new(),
-                name: "Proxy".into(),
                 now: "b".into(),
-                node_type: "Selector".into(),
             }),
             ..ApiSnapshot::default()
         };
@@ -465,15 +451,8 @@ mod tests {
             .push(crate::manager::state::Node::new("a".into()));
         let snapshot = ApiSnapshot {
             proxies: Some(ProxyReport {
-                alive: true,
                 all: vec!["DIRECT".into()],
-                dialer_proxy: String::new(),
-                hidden: false,
-                icon: String::new(),
-                interface: String::new(),
-                name: "Proxy".into(),
                 now: "DIRECT".into(),
-                node_type: "Selector".into(),
             }),
             ..ApiSnapshot::default()
         };

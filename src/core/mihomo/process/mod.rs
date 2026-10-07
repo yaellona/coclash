@@ -10,7 +10,7 @@
 //! （不区分是否由本程序启动）；停止时按控制端口找到属主 mihomo 并结束，
 //! 因此外部启动的实例也能直接关闭，且不会误杀其它实例。
 use crate::error::Error;
-use crate::settings::Settings;
+use crate::settings::{Settings, normalize_ctrl_addr};
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -73,17 +73,15 @@ pub fn ctrl_port(addr: &str) -> Option<u16> {
 }
 
 pub fn ctrl_addr_up(addr: &str) -> bool {
-    let addr: SocketAddr = match addr.parse() {
-        Ok(a) => a,
-        Err(_) => return false,
+    let Ok(addr) = normalize_ctrl_addr(addr).parse::<SocketAddr>() else {
+        return false;
     };
     std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
 }
 
 pub async fn ctrl_addr_up_async(addr: &str) -> bool {
-    let addr: SocketAddr = match addr.parse() {
-        Ok(a) => a,
-        Err(_) => return false,
+    let Ok(addr) = normalize_ctrl_addr(addr).parse::<SocketAddr>() else {
+        return false;
     };
     tokio::time::timeout(
         Duration::from_millis(300),

@@ -100,6 +100,10 @@ impl Page for ProviderSelectPage {
     }
 
     fn draw(&mut self, state: &AppState, f: &mut Frame) {
+        // 订阅数量可能因新增/删除变化，绘制前收敛选中下标，避免高亮越界
+        self.select = self
+            .select
+            .min(Self::provider_count(state).saturating_sub(1));
         let area = popup_rect(f.area());
 
         // 清除背景

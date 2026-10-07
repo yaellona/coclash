@@ -228,17 +228,6 @@ impl Manager {
         }
     }
 
-    pub fn stop_mihomo(&self) {
-        match mihomo::stop_mihomo(self.settings()) {
-            Ok(()) => {
-                self.state_lock().mihomo.status = MihomoStatus::Stopped;
-                self.log("已停止mihomo");
-                self.mark_redraw();
-            }
-            Err(e) => self.log_err(e),
-        }
-    }
-
     /// 直接按端口启停：端口可达 = 运行中 → 停止；否则启动（不判断归属）。
     /// 启停含 UAC 等待、信号轮询等阻塞 IO，交给异步任务（tasks.rs），不卡 UI。
     pub fn toggle_mihomo(&self) {

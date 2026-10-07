@@ -7,22 +7,15 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
+use url::Url;
 
-/// 用于接收 mihomo 策略组回复的节点报告（serde 反序列化目标，字段需全量保留）
-#[allow(dead_code)]
+/// 用于接收 mihomo 策略组回复的节点报告（只取展示需要的字段，其余 serde 自动忽略）
 #[derive(Debug, Deserialize)]
 pub struct ProxyReport {
-    pub alive: bool,
+    /// 组内全部节点名
     pub all: Vec<String>,
-    #[serde(rename = "dialer-proxy")]
-    pub dialer_proxy: String,
-    pub hidden: bool,
-    pub icon: String,
-    pub interface: String,
-    pub name: String,
+    /// 当前选中节点
     pub now: String,
-    #[serde(rename = "type")]
-    pub node_type: String,
 }
 
 /// `/version` 响应（心跳展示内核版本）
@@ -96,15 +89,32 @@ impl ApiClient {
         })
     }
 
-    /// GET + JSON 反序列化（统一超时与错误文案）
-    async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
-        let url = format!("{}{path}", self.base_url);
+    /// 拼一个基于 `base_url` 的 API 端点：路径段由 `Url` 负责百分号编码，
+    /// 组名等含中文/特殊字符的配置值不会破坏 URL。
+    fn endpoint(&self, segments: &[&str]) -> Result<Url, Error> {
+        let mut url =
+            Url::parse(&self.base_url).map_err(|e| Error::Api(format!("API 地址无效: {e}")))?;
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| Error::Api("API 地址不支持路径段".to_string()))?;
+        path.clear();
+        for segment in segments {
+            path.push(segment);
+        }
+        drop(path);
+        Ok(url)
+    }
+
+    /// GET + JSON 反序列化（统一超时、非 2xx 与错误文案）
+    async fn get_json<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
         let body = self
             .client
             .get(url)
             .timeout(self.http_timeout)
             .send()
             .await
+            .map_err(|e| Error::Api(format!("请求失败: {e}")))?
+            .error_for_status()
             .map_err(|e| Error::Api(format!("请求失败: {e}")))?
             .text()
             .await
@@ -113,33 +123,35 @@ impl ApiClient {
     }
 
     pub async fn get_proxy(&self) -> Result<ProxyReport, Error> {
-        self.get_json(&format!("/proxies/{}", self.group)).await
+        self.get_json(self.endpoint(&["proxies", self.group.as_str()])?)
+            .await
     }
 
     pub async fn get_version(&self) -> Result<VersionReport, Error> {
-        self.get_json("/version").await
+        self.get_json(self.endpoint(&["version"])?).await
     }
 
     pub async fn get_configs(&self) -> Result<ConfigsReport, Error> {
-        self.get_json("/configs").await
+        self.get_json(self.endpoint(&["configs"])?).await
     }
 
     pub async fn get_connections(&self) -> Result<ConnectionsReport, Error> {
-        self.get_json("/connections").await
+        self.get_json(self.endpoint(&["connections"])?).await
     }
 
     pub async fn fetch_delays(&self) -> Result<HashMap<String, u32>, Error> {
-        let path = format!(
-            "/group/{}/delay?timeout={}&url={}",
-            self.group, self.delay_timeout_ms, self.test_url
-        );
-        let url = format!("{}{path}", self.base_url);
+        let mut url = self.endpoint(&["group", self.group.as_str(), "delay"])?;
+        url.query_pairs_mut()
+            .append_pair("timeout", &self.delay_timeout_ms.to_string())
+            .append_pair("url", &self.test_url);
         let body = self
             .client
             .get(url)
             .timeout(self.delay_http_timeout)
             .send()
             .await
+            .map_err(|e| Error::Api(format!("测速请求失败: {e}")))?
+            .error_for_status()
             .map_err(|e| Error::Api(format!("测速请求失败: {e}")))?
             .text()
             .await
@@ -148,42 +160,33 @@ impl ApiClient {
     }
 
     pub async fn switch_node(&self, name: &str) -> Result<(), Error> {
-        let url = format!("{}/proxies/{}", self.base_url, self.group);
+        let url = self.endpoint(&["proxies", self.group.as_str()])?;
         let body = serde_json::json!({ "name": name });
-        let resp = self
-            .client
+        self.client
             .put(url)
             .timeout(self.http_timeout)
             .json(&body)
             .send()
             .await
+            .map_err(|e| Error::Api(format!("切换节点失败: {e}")))?
+            .error_for_status()
             .map_err(|e| Error::Api(format!("切换节点失败: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(Error::Api(format!(
-                "切换节点失败：API返回状态码 {}",
-                resp.status()
-            )));
-        }
         Ok(())
     }
 
     pub async fn reload_config(&self, path: &Path) -> Result<(), Error> {
-        let url = format!("{}/configs?force=true", self.base_url);
+        let mut url = self.endpoint(&["configs"])?;
+        url.query_pairs_mut().append_pair("force", "true");
         let body = serde_json::json!({ "path": path.to_string_lossy(), "payload": "" });
-        let resp = self
-            .client
+        self.client
             .put(url)
             .timeout(self.http_timeout)
             .json(&body)
             .send()
             .await
+            .map_err(|e| Error::Api(format!("重载配置失败: {e}")))?
+            .error_for_status()
             .map_err(|e| Error::Api(format!("重载配置失败: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(Error::Api(format!(
-                "重载配置失败：API返回状态码 {}",
-                resp.status()
-            )));
-        }
         Ok(())
     }
 }

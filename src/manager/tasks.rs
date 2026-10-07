@@ -34,14 +34,6 @@ impl Manager {
         });
     }
 
-    /// 重载配置；provider 由 mihomo 后台异步拉取，节点刷新交给心跳（立即触发一次）
-    pub fn reload_config(&self) {
-        let shared = self.shared().clone();
-        tokio::spawn(async move {
-            reload_config_impl(&shared).await;
-        });
-    }
-
     /// 添加订阅：锁内命名 + 插入（同一临界区）→ 锁外写盘 → 重载
     pub fn insert_sub(&self, url: String) {
         let shared = self.shared().clone();

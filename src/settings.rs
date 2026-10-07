@@ -17,12 +17,9 @@ pub struct Settings {
     pub delay_timeout_ms: u64,
     pub http_timeout_ms: u64,
     pub delay_http_timeout_ms: u64,
-    pub provider_retry: u32,
-    pub provider_retry_interval_ms: u64,
     pub poll_interval_ms: u64,
     /// 心跳间隔（毫秒）；0 = 关闭心跳
     pub heartbeat_interval_ms: u64,
-    pub channel_capacity: usize,
 }
 
 impl Default for Settings {
@@ -33,12 +30,19 @@ impl Default for Settings {
             delay_timeout_ms: 5000,
             http_timeout_ms: 5000,
             delay_http_timeout_ms: 6000,
-            provider_retry: 6,
-            provider_retry_interval_ms: 500,
             poll_interval_ms: 100,
             heartbeat_interval_ms: 3000,
-            channel_capacity: 16,
         }
+    }
+}
+
+/// 归一化 external-controller 地址：mihomo 允许 `:9090` 这种「仅端口」写法，
+/// 补上回环主机，避免 `SocketAddr`/URL 解析失败（`ctrl_addr_up`、`api_url` 共用）。
+pub fn normalize_ctrl_addr(addr: &str) -> String {
+    if addr.starts_with(':') {
+        format!("127.0.0.1{addr}")
+    } else {
+        addr.to_string()
     }
 }
 
@@ -65,7 +69,7 @@ impl Settings {
 
     /// RESTful API 基地址：由 external-controller 地址派生（唯一数据源，避免两处地址脱钩）
     pub fn api_url(&self) -> String {
-        format!("http://{}", self.mihomo_ctrl_addr)
+        format!("http://{}", normalize_ctrl_addr(&self.mihomo_ctrl_addr))
     }
 
     pub fn http_timeout(&self) -> Duration {
@@ -74,10 +78,6 @@ impl Settings {
 
     pub fn delay_http_timeout(&self) -> Duration {
         Duration::from_millis(self.delay_http_timeout_ms)
-    }
-
-    pub fn provider_retry_interval(&self) -> Duration {
-        Duration::from_millis(self.provider_retry_interval_ms)
     }
 
     pub fn poll_interval(&self) -> Duration {
@@ -119,5 +119,15 @@ mod tests {
         );
         // P1-1 回归：API 地址由 ctrl 地址派生
         assert_eq!(s.api_url(), "http://127.0.0.1:9999");
+    }
+
+    #[test]
+    fn test_normalize_ctrl_addr() {
+        assert_eq!(normalize_ctrl_addr("127.0.0.1:9090"), "127.0.0.1:9090");
+        assert_eq!(normalize_ctrl_addr(":9090"), "127.0.0.1:9090");
+        assert_eq!(normalize_ctrl_addr("[::1]:9090"), "[::1]:9090");
+        // 配置为「仅端口」时 API 基地址也必须是合法 URL
+        let s: Settings = serde_json::from_str(r#"{"mihomo_ctrl_addr":":9090"}"#).unwrap();
+        assert_eq!(s.api_url(), "http://127.0.0.1:9090");
     }
 }
